@@ -2,12 +2,13 @@
 
 use anyhow::Result;
 use futures::future::join_all;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Error as NotifyError, Watcher};
+use notify::{Event, RecursiveMode, Error as NotifyError, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 use tracing::{error, info};
 
+use crate::config::Config;
 use crate::nix_utils as nix;
 use crate::s3_uploader::S3Uploader;
 
@@ -16,9 +17,9 @@ const NIX_STORE_DIR: &str = "/nix/store";
 /// Scans the Nix store for existing paths and uploads them.
 pub async fn scan_and_process_existing_paths(
     uploader: Arc<S3Uploader>,
-    max_concurrency: usize,
+    config: &Config,
 ) -> Result<()> {
-    let semaphore = Arc::new(Semaphore::new(max_concurrency));
+    let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
     let store_dir = Path::new(NIX_STORE_DIR);
 
     let mut tasks = Vec::new();
@@ -30,9 +31,10 @@ pub async fn scan_and_process_existing_paths(
         if path.is_dir() {
             let uploader_clone = uploader.clone();
             let semaphore_clone = semaphore.clone();
+            let config_for_task = config.clone(); // Clone config for the spawned task
             tasks.push(tokio::spawn(async move {
                 let permit = semaphore_clone.acquire_owned().await.unwrap();
-                if let Err(e) = process_path(uploader_clone, &path).await {
+                if let Err(e) = process_path(uploader_clone, &path, &config_for_task).await {
                     error!("Failed to process '{}': {:?}", path.display(), e);
                 }
                 drop(permit);
@@ -46,9 +48,12 @@ pub async fn scan_and_process_existing_paths(
 }
 
 /// Watches the Nix store and uploads new paths.
-pub async fn watch_store(uploader: Arc<S3Uploader>, max_concurrency: usize) -> Result<()> {
+pub async fn watch_store(
+    uploader: Arc<S3Uploader>,
+    config: &Config,
+) -> Result<()> {
     let (tx, mut rx) = mpsc::channel(100);
-    let semaphore = Arc::new(Semaphore::new(max_concurrency));
+    let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
 
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, NotifyError>| {
         if let Ok(event) = res {
@@ -72,10 +77,10 @@ pub async fn watch_store(uploader: Arc<S3Uploader>, max_concurrency: usize) -> R
     while let Some(path) = rx.recv().await {
         let uploader_clone = uploader.clone();
         let semaphore_clone = semaphore.clone();
-
+        let config_for_task = config.clone(); // Clone config for the spawned task
         tokio::spawn(async move {
             let permit = semaphore_clone.acquire_owned().await.unwrap();
-            if let Err(e) = process_path(uploader_clone, &path).await {
+            if let Err(e) = process_path(uploader_clone, &path, &config_for_task).await {
                 error!("Failed to process '{}': {:?}", path.display(), e);
             }
             drop(permit);
@@ -86,7 +91,7 @@ pub async fn watch_store(uploader: Arc<S3Uploader>, max_concurrency: usize) -> R
 }
 
 /// Processes a single store path for upload.
-async fn process_path(uploader: Arc<S3Uploader>, path: &Path) -> Result<()> {
+async fn process_path(uploader: Arc<S3Uploader>, path: &Path, config: &Config) -> Result<()> {
     let path_str = path.to_str().unwrap_or("").to_string();
 
     // 1. Get the closure of the path.
@@ -106,7 +111,7 @@ async fn process_path(uploader: Arc<S3Uploader>, path: &Path) -> Result<()> {
     for p_str in missing_paths {
         let p = Path::new(&p_str);
         // Upload NAR, then .narinfo
-        nix::upload_nar_for_path(uploader.clone(), p).await?;
+        nix::upload_nar_for_path(uploader.clone(), p, config).await?;
     }
 
     Ok(())

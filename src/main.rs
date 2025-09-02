@@ -45,12 +45,14 @@ async fn main() -> Result<()> {
     );
 
     let marker_file = Path::new(".loft_scan_complete");
-    if config.scan_on_startup && !marker_file.exists() {
+    info!("scan on startup: {}", config.loft.scan_on_startup);
+    info!("marker file exists: {}", marker_file.exists());
+    if config.loft.scan_on_startup && !marker_file.exists() {
         // Scan existing paths and upload them.
         info!("Scanning existing store paths...");
         nix_store_watcher::scan_and_process_existing_paths(
             uploader.clone(),
-            config.upload_threads,
+            &config,
         )
         .await?;
         info!("Finished scanning existing store paths.");
@@ -60,7 +62,7 @@ async fn main() -> Result<()> {
 
     // Start watching the Nix store for new paths.
     info!("Watching for new store paths...");
-    nix_store_watcher::watch_store(uploader, config.upload_threads).await?;
+    nix_store_watcher::watch_store(uploader, &config).await?;
 
     Ok(())
 }

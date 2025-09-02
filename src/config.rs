@@ -3,29 +3,42 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Main configuration for the application.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Config {
     /// S3 storage configuration.
     pub s3: S3Config,
+    /// Loft-specific configuration.
+    pub loft: LoftConfig,
+}
+
+/// Loft-specific configuration.
+#[derive(Deserialize, Debug, Clone)]
+pub struct LoftConfig {
     /// The number of concurrent uploads to perform.
     #[serde(default = "default_upload_threads")]
     pub upload_threads: usize,
     /// Whether to perform an initial scan of the store on startup.
     #[serde(default)]
     pub scan_on_startup: bool,
+    /// Optional: Path to your Nix signing key file (e.g., /etc/nix/signing-key.sec)
+    /// If provided, uploaded paths will be signed.
+    pub signing_key_path: Option<PathBuf>,
+    /// Optional: Name of your Nix signing key (e.g., "cache.example.org-1")
+    /// Required if signing_key_path is provided.
+    pub signing_key_name: Option<String>,
 }
 
 /// S3-specific configuration.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct S3Config {
     pub bucket: String,
     pub region: String,
     pub endpoint: String,
-    pub access_key: String,
-    pub secret_key: String,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
 }
 
 /// Sets the default number of upload threads if not specified.

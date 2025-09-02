@@ -1,7 +1,8 @@
 //! Handles all interactions with S3-compatible storage.
 
 use anyhow::Result;
-use aws_config::from_env;
+use aws_config::defaults;
+use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
@@ -19,12 +20,20 @@ pub struct S3Uploader {
 impl S3Uploader {
     /// Creates a new S3 uploader from the given configuration.
     pub async fn new(config: &S3Config) -> Result<Self> {
-        let config_loader = from_env()
+        let access_key = config.access_key.clone().or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok());
+        let secret_key = config.secret_key.clone().or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok());
+
+        let (access_key, secret_key) = match (access_key, secret_key) {
+            (Some(ak), Some(sk)) => (ak, sk),
+            _ => return Err(anyhow::anyhow!("AWS access key and secret key must be provided either in config or as environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)")),
+        };
+
+        let config_loader = defaults(BehaviorVersion::latest())
             .endpoint_url(config.endpoint.as_str())
             .region(Region::new(config.region.clone()))
             .credentials_provider(Credentials::new(
-                &config.access_key,
-                &config.secret_key,
+                &access_key,
+                &secret_key,
                 None,
                 None,
                 "default",
