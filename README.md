@@ -1,6 +1,16 @@
 # Loft
 
-A lightweight, client-only Nix binary cache uploader for S3-compatible storage like Garage or MinIO.
+Loft is a lightweight, client-only Nix binary cache uploader designed for S3-compatible storage like Garage or MinIO. The name "Loft" is a nod to its inspiration, [Attic](https://github.com/zhaofengli/attic), and its primary backend target, [Garage](https://garage.deuxfleurs.fr/). It sits somewhere in between—a cozy loft between the attic and the garage.
+
+While Attic is a fantastic, feature-rich solution, it requires a server-client setup that may be more than what's needed for simpler use cases. Loft fills a specific gap: providing the convenience of a client-side helper with some of Attic’s best features (like cache checking, native Nix bindings, and watching the Nix store) without the overhead of deploying and managing a server, users, and permissions.
+
+It's designed for scenarios where you want more than just a raw S3 bucket but don't need a full-scale cache server. Think of it as the perfect tool for:
+
+*   **CI/CD pipelines**: Quickly and efficiently pushing build artifacts to a cache.
+*   **Single-user setups**: A simple way to manage your own binary cache.
+*   **Homelabs**: An easy-to-deploy cache for your local network.
+
+If you're looking for a straightforward, no-fuss way to manage a Nix cache on S3, Loft is for you.
 
 ## Features
 
