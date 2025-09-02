@@ -43,6 +43,9 @@
               # For interacting with S3-compatible storage (e.g., MinIO, Garage)
               # Remember to configure rclone (e.g., rclone config) for your S3 bucket.
               rclone
+              # For openssl-sys dependency of reqwest
+              pkg-config
+              openssl
             ];
             shellHook = ''
               # Source the .env file to make environment variables available

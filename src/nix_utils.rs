@@ -9,9 +9,34 @@ use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::time::sleep;
 use tracing::{info, warn};
+use reqwest;
 
 use crate::config::Config;
 use crate::s3_uploader::S3Uploader;
+
+/// Checks if a store path exists in an upstream binary cache.
+pub async fn check_path_in_upstream_cache(cache_url: &str, store_path: &str) -> Result<bool> {
+    let store_hash = Path::new(store_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.split('-').next().unwrap_or(""))
+        .unwrap_or("");
+
+    let narinfo_url = format!("{}/narinfo/{}", cache_url, store_hash);
+
+    let client = reqwest::Client::new();
+    let response = client.get(&narinfo_url).send().await?;
+
+    match response.status() {
+        reqwest::StatusCode::OK => Ok(true),
+        reqwest::StatusCode::NOT_FOUND => Ok(false),
+        _ => Err(anyhow::anyhow!(
+            "Failed to query upstream cache {}: Unexpected status code {}",
+            cache_url,
+            response.status()
+        )),
+    }
+}
 
 /// Gets the closure of a store path.
 pub fn get_store_path_closure(store_path: &str) -> Result<Vec<String>> {
