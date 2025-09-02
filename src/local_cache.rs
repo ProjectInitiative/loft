@@ -20,6 +20,7 @@ impl LocalCache {
 
     /// Initializes the database, creating tables if they don't exist.
     pub fn initialize(&self) -> Result<()> {
+
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "CREATE TABLE IF NOT EXISTS uploaded_paths (
@@ -58,6 +59,13 @@ impl LocalCache {
             "INSERT OR REPLACE INTO metadata (key, value) VALUES ('scan_complete', 'true')",
             [],
         )?;
+        Ok(())
+    }
+
+    /// Clears the initial scan complete flag.
+    pub fn clear_scan_complete(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM metadata WHERE key = 'scan_complete'", [])?;
         Ok(())
     }
 

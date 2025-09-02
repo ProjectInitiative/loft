@@ -33,6 +33,14 @@ struct Args {
     /// Clear the local cache.
     #[arg(long)]
     clear_cache: bool,
+
+    /// Reset the initial scan complete flag.
+    #[arg(long)]
+    reset_initial_scan: bool,
+
+    /// Force a full scan, bypassing the local cache.
+    #[arg(long)]
+    force_scan: bool,
 }
 
 #[tokio::main]
@@ -60,6 +68,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if args.reset_initial_scan {
+        info!("Resetting initial scan flag...");
+        local_cache.clear_scan_complete()?;
+        info!("Initial scan flag reset.");
+        return Ok(());
+    }
+
     // Load the application configuration.
     let config = Config::from_file(&args.config)?;
     info!("Configuration loaded successfully.");
@@ -71,7 +86,7 @@ async fn main() -> Result<()> {
         config.s3.bucket
     );
 
-        info!("scan on startup: {}", config.loft.scan_on_startup);
+    info!("scan on startup: {}", config.loft.scan_on_startup);
     info!(
         "scan already complete: {}",
         local_cache.is_scan_complete()?
@@ -83,6 +98,7 @@ async fn main() -> Result<()> {
             uploader.clone(),
             local_cache.clone(),
             &config,
+            args.force_scan,
         )
         .await?;
         info!("Finished scanning existing store paths.");
@@ -92,8 +108,7 @@ async fn main() -> Result<()> {
 
     // Start watching the Nix store for new paths.
     info!("Watching for new store paths...");
-    nix_store_watcher::watch_store(uploader, local_cache, &config).await?;
+    nix_store_watcher::watch_store(uploader, local_cache, &config, args.force_scan).await?;
 
     Ok(())
 }
-

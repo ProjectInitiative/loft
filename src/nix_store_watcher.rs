@@ -21,6 +21,7 @@ pub async fn scan_and_process_existing_paths(
     uploader: Arc<S3Uploader>,
     local_cache: Arc<LocalCache>,
     config: &Config,
+    force_scan: bool,
 ) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
     let store_dir = Path::new(NIX_STORE_DIR);
@@ -38,7 +39,7 @@ pub async fn scan_and_process_existing_paths(
             let config_for_task = config.clone(); // Clone config for the spawned task
             tasks.push(tokio::spawn(async move {
                 let permit = semaphore_clone.acquire_owned().await.unwrap();
-                if let Err(e) = process_path(uploader_clone, local_cache_clone, &path, &config_for_task).await {
+                if let Err(e) = process_path(uploader_clone, local_cache_clone, &path, &config_for_task, force_scan).await {
                     error!("Failed to process '{}': {:?}", path.display(), e);
                 }
                 drop(permit);
@@ -56,6 +57,7 @@ pub async fn watch_store(
     uploader: Arc<S3Uploader>,
     local_cache: Arc<LocalCache>,
     config: &Config,
+    force_scan: bool,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel(100);
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
@@ -86,7 +88,7 @@ pub async fn watch_store(
         let config_for_task = config.clone(); // Clone config for the spawned task
         tokio::spawn(async move {
             let permit = semaphore_clone.acquire_owned().await.unwrap();
-            if let Err(e) = process_path(uploader_clone, local_cache_clone, &path, &config_for_task).await {
+            if let Err(e) = process_path(uploader_clone, local_cache_clone, &path, &config_for_task, force_scan).await {
                 error!("Failed to process '{}': {:?}", path.display(), e);
             }
             drop(permit);
@@ -102,6 +104,7 @@ async fn process_path(
     local_cache: Arc<LocalCache>,
     path: &Path,
     config: &Config,
+    force_scan: bool,
 ) -> Result<()> {
     let path_str = path.to_str().unwrap_or("").to_string();
     let nix_store = NixStore::connect()?;
@@ -135,17 +138,21 @@ async fn process_path(
         closure_path_infos.insert(p_str.clone(), path_info);
     }
 
-    let existing_hashes = local_cache.find_existing_hashes(&closure_hashes)?;
-    let missing_paths_from_local: Vec<String> = closure
-        .into_iter()
-        .filter(|p| {
-            let path_info = closure_path_infos.get(p).unwrap();
-            let hash = path_info.nar_hash.to_typed_base32();
-            !existing_hashes.contains(&hash)
-        })
-        .collect();
+    let missing_paths_from_local: Vec<String> = if force_scan {
+        closure.clone()
+    } else {
+        let existing_hashes = local_cache.find_existing_hashes(&closure_hashes)?;
+        closure
+            .into_iter()
+            .filter(|p| {
+                let path_info = closure_path_infos.get(p).unwrap();
+                let hash = path_info.nar_hash.to_typed_base32();
+                !existing_hashes.contains(&hash)
+            })
+            .collect()
+    };
 
-    if missing_paths_from_local.is_empty() {
+    if missing_paths_from_local.is_empty() && !force_scan {
         info!(
             "All paths in the closure of '{}' are already in the local cache.",
             path.display()
