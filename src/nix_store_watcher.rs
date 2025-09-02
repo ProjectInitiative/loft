@@ -97,28 +97,22 @@ async fn process_path(uploader: Arc<S3Uploader>, path: &Path, config: &Config) -
     // 1. Get the closure of the path.
     let closure = nix::get_store_path_closure(&path_str)?;
 
-    // Filter out paths that exist in upstream caches
-    let mut paths_to_check_s3 = Vec::new();
-    if let Some(upstream_caches) = &config.loft.upstream_caches {
-        for p_str in &closure {
-            let mut found_in_upstream = false;
-            for cache_url in upstream_caches {
-                if nix::check_path_in_upstream_cache(cache_url, p_str).await? {
-                    info!("'{}' found in upstream cache '{}'. Skipping S3 upload.", p_str, cache_url);
-                    found_in_upstream = true;
-                    break;
-                }
-            }
-            if !found_in_upstream {
-                paths_to_check_s3.push(p_str.clone());
+    // Check if the path is signed by a key that should be skipped.
+    if let Some(keys_to_skip) = &config.loft.skip_signed_by_keys {
+        if let Some(path_signature_key) = nix::get_path_signature_key(&path_str).await? {
+            if keys_to_skip.contains(&path_signature_key) {
+                info!(
+                    "Skipping '{}' as it was signed by key '{}', which is in the skip list.",
+                    path.display(),
+                    path_signature_key
+                );
+                return Ok(());
             }
         }
-    } else {
-        paths_to_check_s3 = closure;
     }
 
     // 2. Check which paths are missing from the cache.
-    let missing_paths = uploader.check_paths_exist(&paths_to_check_s3).await?;
+    let missing_paths = uploader.check_paths_exist(&closure, config).await?;
 
     if missing_paths.is_empty() {
         info!("All paths in the closure of '{}' are already cached.", path.display());

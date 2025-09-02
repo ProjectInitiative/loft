@@ -29,10 +29,9 @@ pub struct LoftConfig {
     /// Optional: Name of your Nix signing key (e.g., "cache.example.org-1")
     /// Required if signing_key_path is provided.
     pub signing_key_name: Option<String>,
-    /// Optional: List of upstream binary caches to check before uploading.
-    /// If a path exists in an upstream cache, it will not be uploaded.
-    #[serde(default)]
-    pub upstream_caches: Option<Vec<String>>,
+    /// Optional: List of public keys whose signed paths should be skipped for upload.
+    /// If a path is signed by any of these keys, it will not be uploaded.
+    pub skip_signed_by_keys: Option<Vec<String>>,
 }
 
 /// S3-specific configuration.

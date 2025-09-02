@@ -8,6 +8,7 @@ Cargo.lock
 
 #Config
 loft.toml
+attic/
 
 #env
 .direnv

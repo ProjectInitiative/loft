@@ -7,12 +7,13 @@ use clap::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, Level};
 
 mod config;
 mod nix_store_watcher;
 mod nix_utils;
 mod s3_uploader;
+mod nix_manifest;
 
 use config::Config;
 
@@ -28,7 +29,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize the logging framework.
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(Level::DEBUG)
+        .init();
 
     // Parse command-line arguments.
     let args = Args::parse();

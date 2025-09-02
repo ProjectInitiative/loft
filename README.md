@@ -44,10 +44,10 @@ signing_key_path = "/path/to/your/nix-signing-key.sec"
 # Required if signing_key_path is provided.
 signing_key_name = "your-cache-key-name"
 
-# Optional: List of upstream binary caches to check before uploading.
-# If a path exists in an upstream cache, it will not be uploaded.
-# Example: upstream_caches = ["https://cache.nixos.org"]
-upstream_caches = []
+# Optional: List of public keys whose signed paths should be skipped for upload.
+# If a path is signed by any of these keys, it will not be uploaded.
+# Example: skip_signed_by_keys = ["cache.nixos.org-1", "nix-community.cachix.org-1"]
+skip_signed_by_keys = []
 ```
 
 ### Development Environment (with rclone)
@@ -87,9 +87,9 @@ NIX_SIGNING_KEY_PATH="/path/to/your/nix-signing-key.sec"
 # Optional: Name of your Nix signing key
 NIX_SIGNING_KEY_NAME="your-cache-key-name"
 
-# Optional: Comma-separated list of upstream binary caches to check before uploading.
-# Example: UPSTREAM_CACHES="https://cache.nixos.org,https://nix-community.cachix.org"
-UPSTREAM_CACHES=""
+# Optional: Comma-separated list of public keys whose signed paths should be skipped for upload.
+# Example: LOFT_SKIP_SIGNED_BY_KEYS="cache.nixos.org-1,nix-community.cachix.org-1"
+LOFT_SKIP_SIGNED_BY_KEYS=""
 ```
 
 ## Usage

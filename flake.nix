@@ -6,9 +6,10 @@
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
+    attic-flake.url = "github:zhaofengli/attic";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, attic-flake }@inputs:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -34,6 +35,7 @@
 
         devShells = {
           default = craneLib.devShell {
+            inputsFrom = [ attic-flake.devShells.${system}.default ];
             # Additional development tools
             packages = with pkgs; [
               # For interacting with Garage S3
@@ -103,6 +105,17 @@ EOF
               fi
               if [ -n "$NIX_SIGNING_KEY_NAME" ]; then
                 echo "signing_key_name = \"$NIX_SIGNING_KEY_NAME\"" >> "$LOFT_CONFIG_DIR/loft.toml"
+              fi
+
+              if [ -n "$LOFT_SKIP_SIGNED_BY_KEYS" ]; then
+                IFS=',' read -ra ADDR <<< "$LOFT_SKIP_SIGNED_BY_KEYS"
+                printf 'skip_signed_by_keys = [' >> "$LOFT_CONFIG_DIR/loft.toml"
+                for i in "''${ADDR[@]}"; do
+                  printf '"%s",' "$i" >> "$LOFT_CONFIG_DIR/loft.toml"
+                done
+                # Remove trailing comma and close array
+                sed -i 's/,$//' "$LOFT_CONFIG_DIR/loft.toml"
+                printf ']\n' >> "$LOFT_CONFIG_DIR/loft.toml"
               fi
 
               export LOFT_CONFIG="$LOFT_CONFIG_DIR/loft.toml"
