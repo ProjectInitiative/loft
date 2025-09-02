@@ -6,7 +6,7 @@ use notify::{Event, RecursiveMode, Error as NotifyError, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{error, info};
+use tracing::{error, info, debug};
 
 use attic::nix_store::NixStore;
 use crate::config::Config;
@@ -62,6 +62,8 @@ pub async fn watch_store(
     let (tx, mut rx) = mpsc::channel(100);
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
 
+    
+
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, NotifyError>| {
         if let Ok(event) = res {
             for path in event.paths {
@@ -109,8 +111,11 @@ async fn process_path(
     let path_str = path.to_str().unwrap_or("").to_string();
     let nix_store = NixStore::connect()?;
 
+    debug!("Processing path: {}", path.display());
+
     // 1. Get the closure of the path.
     let closure = nix::get_store_path_closure(&path_str)?;
+    debug!("Closure for {}: {:?}", path.display(), closure);
 
     // Check if the path is signed by a key that should be skipped.
     if let Some(keys_to_skip) = &config.loft.skip_signed_by_keys {
@@ -137,17 +142,24 @@ async fn process_path(
         closure_hashes.push(hash.clone());
         closure_path_infos.insert(p_str.clone(), path_info);
     }
+    debug!("Closure hashes for {}: {:?}", path.display(), closure_hashes);
 
     let missing_paths_from_local: Vec<String> = if force_scan {
+        debug!("Force scan enabled, bypassing local cache check for {}", path.display());
         closure.clone()
     } else {
         let existing_hashes = local_cache.find_existing_hashes(&closure_hashes)?;
+        debug!("Existing hashes in local cache for {}: {:?}", path.display(), existing_hashes);
         closure
             .into_iter()
             .filter(|p| {
                 let path_info = closure_path_infos.get(p).unwrap();
                 let hash = path_info.nar_hash.to_typed_base32();
-                !existing_hashes.contains(&hash)
+                let is_missing = !existing_hashes.contains(&hash);
+                if !is_missing {
+                    debug!("Path {} (hash {}) found in local cache.", p, hash);
+                }
+                is_missing
             })
             .collect()
     };
@@ -161,9 +173,20 @@ async fn process_path(
     }
 
     // 3. Check which of the remaining paths are missing from the remote cache.
-    let missing_paths_from_remote = uploader
+    debug!("Checking remote cache for missing paths from local for {}: {:?}", path.display(), missing_paths_from_local);
+    let (missing_paths_from_remote, found_paths_from_remote) = uploader
         .check_paths_exist(&missing_paths_from_local, config)
         .await?;
+    debug!("Missing paths from remote for {}: {:?}", path.display(), missing_paths_from_remote);
+    debug!("Found paths from remote for {}: {:?}", path.display(), found_paths_from_remote);
+
+    // Add the paths found in the remote cache to the local cache.
+    for p_str in found_paths_from_remote {
+        let path_info = closure_path_infos.get(&p_str).unwrap();
+        let hash = path_info.nar_hash.to_typed_base32();
+        debug!("Adding remotely found path {} (hash {}) to local cache.", p_str, hash);
+        local_cache.add_path_hash(&hash)?;
+    }
 
     if missing_paths_from_remote.is_empty() {
         info!(
@@ -171,6 +194,7 @@ async fn process_path(
             path.display()
         );
         // Add the paths to the local cache so we don't check them again.
+        debug!("Adding all closure hashes to local cache for {}: {:?}", path.display(), closure_hashes);
         local_cache.add_many_path_hashes(&closure_hashes)?;
         return Ok(());
     }
@@ -183,11 +207,13 @@ async fn process_path(
     // 4. Upload each missing path.
     for p_str in missing_paths_from_remote {
         let p = Path::new(&p_str);
+        debug!("Uploading path: {}", p.display());
         // Upload NAR, then .narinfo
         nix::upload_nar_for_path(uploader.clone(), p, config).await?;
         // Add the path to the local cache.
         let path_info = closure_path_infos.get(&p_str).unwrap();
         let hash = path_info.nar_hash.to_typed_base32();
+        debug!("Adding uploaded path {} (hash {}) to local cache.", p.display(), hash);
         local_cache.add_path_hash(&hash)?;
     }
 

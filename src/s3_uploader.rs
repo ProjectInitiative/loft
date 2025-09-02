@@ -61,8 +61,9 @@ impl S3Uploader {
     /// Checks if a list of store paths already exist in the cache.
     ///
     /// This is a client-side adaptation of the server's "get-missing-paths" endpoint.
-    pub async fn check_paths_exist(&self, store_paths: &[String], config: &crate::config::Config) -> Result<Vec<String>> {
+    pub async fn check_paths_exist(&self, store_paths: &[String], config: &crate::config::Config) -> Result<(Vec<String>, Vec<String>)> {
         let mut missing_paths = Vec::new();
+        let mut found_paths = Vec::new();
 
         let skip_signed_by_keys: Vec<String> = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
 
@@ -106,7 +107,7 @@ impl S3Uploader {
                 info!("Path '{}' has signatures: {:?}", path_str, path_info.sigs);
             }
 
-            let key = format!("{}.narinfo", path_info.path.to_hash().to_string());
+            let key = format!("{}.narinfo", path_info.nar_hash.to_typed_base32());
 
             match self
                 .client
@@ -118,6 +119,7 @@ impl S3Uploader {
             {
                 Ok(_) => {
                     info!("'{}' already exists in the cache. Skipping.", path_str);
+                    found_paths.push(path_str.clone());
                 }
                 Err(e) => {
                     info!("'{}' not found in cache. Will upload.", path_str);
@@ -126,7 +128,7 @@ impl S3Uploader {
                 }
             }
         }
-        Ok(missing_paths)
+        Ok((missing_paths, found_paths))
     }
 
     /// Uploads a file to the S3 bucket.

@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::{Connection, params, ToSql};
 use std::path::Path;
 use std::sync::Mutex;
-use tracing::info;
+use tracing::{info,debug};
 
 /// A local cache to keep track of uploaded store paths.
 pub struct LocalCache {
@@ -106,13 +106,19 @@ impl LocalCache {
         let conn = self.conn.lock().unwrap();
         let mut existing_hashes = std::collections::HashSet::new();
         if hashes.is_empty() {
+            debug!("find_existing_hashes: input hashes is empty.");
             return Ok(existing_hashes);
         }
 
-        let mut stmt = conn.prepare(&format!(
+        debug!("find_existing_hashes: checking for {} hashes.", hashes.len());
+
+        let query_string = format!(
             "SELECT hash FROM uploaded_paths WHERE hash IN ({})",
             hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",")
-        ))?;
+        );
+        debug!("find_existing_hashes: query string: {}", query_string);
+
+        let mut stmt = conn.prepare(&query_string)?;
 
         let params: Vec<&dyn rusqlite::ToSql> = hashes
             .iter()
@@ -121,9 +127,12 @@ impl LocalCache {
         let mut rows = stmt.query(&*params)?;
 
         while let Some(row) = rows.next()? {
-            existing_hashes.insert(row.get(0)?);
+            let hash: String = row.get(0)?;
+            debug!("find_existing_hashes: found existing hash: {}", hash);
+            existing_hashes.insert(hash);
         }
 
+        debug!("find_existing_hashes: found {} existing hashes.", existing_hashes.len());
         Ok(existing_hashes)
     }
 }
