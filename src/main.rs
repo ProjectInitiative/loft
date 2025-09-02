@@ -4,14 +4,15 @@
 
 use anyhow::Result;
 use clap::Parser;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
 
 mod config;
+mod nix_store_watcher;
 mod nix_utils;
 mod s3_uploader;
-mod nix_store_watcher;
 
 use config::Config;
 
@@ -38,14 +39,27 @@ async fn main() -> Result<()> {
 
     // Initialize the S3 uploader.
     let uploader = Arc::new(s3_uploader::S3Uploader::new(&config.s3).await?);
-    info!("S3 uploader initialized for bucket '{}'.", config.s3.bucket);
+    info!(
+        "S3 uploader initialized for bucket '{}'.",
+        config.s3.bucket
+    );
 
-    // Scan existing paths and upload them.
-    info!("Scanning existing store paths...");
-    nix_store_watcher::scan_and_process_existing_paths(uploader.clone(), config.upload_threads).await?;
-    info!("Finished scanning existing store paths.");
+    let marker_file = Path::new(".loft_scan_complete");
+    if config.scan_on_startup && !marker_file.exists() {
+        // Scan existing paths and upload them.
+        info!("Scanning existing store paths...");
+        nix_store_watcher::scan_and_process_existing_paths(
+            uploader.clone(),
+            config.upload_threads,
+        )
+        .await?;
+        info!("Finished scanning existing store paths.");
+        // Create the marker file to indicate that the initial scan is complete.
+        fs::File::create(marker_file)?;
+    }
 
     // Start watching the Nix store for new paths.
+    info!("Watching for new store paths...");
     nix_store_watcher::watch_store(uploader, config.upload_threads).await?;
 
     Ok(())

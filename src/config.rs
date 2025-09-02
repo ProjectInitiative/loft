@@ -13,6 +13,9 @@ pub struct Config {
     /// The number of concurrent uploads to perform.
     #[serde(default = "default_upload_threads")]
     pub upload_threads: usize,
+    /// Whether to perform an initial scan of the store on startup.
+    #[serde(default)]
+    pub scan_on_startup: bool,
 }
 
 /// S3-specific configuration.
