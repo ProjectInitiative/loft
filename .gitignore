@@ -13,3 +13,4 @@ attic/
 #env
 .direnv
 .env
+.loft_scan_complete
