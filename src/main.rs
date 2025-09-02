@@ -24,17 +24,25 @@ struct Args {
     /// Path to the configuration file.
     #[arg(short, long, default_value = "loft.toml")]
     config: PathBuf,
+
+    /// Enable debug logging.
+    #[arg(long)]
+    debug: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize the logging framework.
-    tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
-        .init();
-
     // Parse command-line arguments.
     let args = Args::parse();
+
+    // Initialize the logging framework.
+    let subscriber = tracing_subscriber::fmt();
+
+    if args.debug {
+        subscriber.with_max_level(Level::DEBUG).init();
+    } else {
+        subscriber.with_max_level(Level::INFO).init(); // Default to INFO
+    }
 
     // Load the application configuration.
     let config = Config::from_file(&args.config)?;
