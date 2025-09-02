@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, Level};
+use tracing::{info, Level, debug};
 
 mod config;
 mod nix_store_watcher;
@@ -41,6 +41,10 @@ struct Args {
     /// Force a full scan, bypassing the local cache.
     #[arg(long)]
     force_scan: bool,
+
+    /// Populate the local cache from S3.
+    #[arg(long)]
+    populate_cache: bool,
 }
 
 #[tokio::main]
@@ -75,6 +79,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    
+
     // Load the application configuration.
     let config = Config::from_file(&args.config)?;
     info!("Configuration loaded successfully.");
@@ -85,6 +91,19 @@ async fn main() -> Result<()> {
         "S3 uploader initialized for bucket '{}'.",
         config.s3.bucket
     );
+
+    if args.populate_cache {
+        populate_local_cache_from_s3(uploader.clone(), local_cache.clone()).await?;
+        return Ok(());
+    }
+
+    
+
+    if config.loft.populate_cache_on_startup && !local_cache.is_scan_complete()? {
+        info!("Populating local cache from S3 on startup...");
+        populate_local_cache_from_s3(uploader.clone(), local_cache.clone()).await?;
+        info!("Finished populating local cache from S3.");
+    }
 
     info!("scan on startup: {}", config.loft.scan_on_startup);
     info!(
@@ -109,6 +128,30 @@ async fn main() -> Result<()> {
     // Start watching the Nix store for new paths.
     info!("Watching for new store paths...");
     nix_store_watcher::watch_store(uploader, local_cache, &config, args.force_scan).await?;
+
+    Ok(())
+}
+
+async fn populate_local_cache_from_s3(
+    uploader: Arc<s3_uploader::S3Uploader>,
+    local_cache: Arc<local_cache::LocalCache>,
+) -> Result<()> {
+    info!("Populating local cache from S3...");
+    let all_narinfo_keys = uploader.list_all_narinfo_keys().await?;
+    info!("Found {} .narinfo keys in S3.", all_narinfo_keys.len());
+
+    let mut hashes = Vec::new();
+    for key in all_narinfo_keys {
+        if let Some(hash) = key.strip_suffix(".narinfo") {
+            // Do NOT add "sha256:" prefix here. Store as plain hash.
+            hashes.push(hash.to_string());
+        }
+    }
+    debug!("Adding {} hashes to local cache: {:?}", hashes.len(), hashes);
+
+    local_cache.add_many_path_hashes(&hashes)?;
+    local_cache.set_scan_complete()?;
+    info!("Local cache populated from S3.");
 
     Ok(())
 }

@@ -19,7 +19,7 @@ pub struct S3Uploader {
     nix_store: NixStore,
 }
 
-impl S3Uploader {
+'''impl S3Uploader {
     /// Creates a new S3 uploader from the given configuration.
     pub async fn new(config: &S3Config) -> Result<Self> {
         let access_key = config.access_key.clone().or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok());
@@ -44,7 +44,6 @@ impl S3Uploader {
         let sdk_config = config_loader.load().await;
 
         let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
-            .force_path_style(true)
             .build();
 
         let client = Client::from_conf(s3_config);
@@ -107,7 +106,8 @@ impl S3Uploader {
                 info!("Path '{}' has signatures: {:?}", path_str, path_info.sigs);
             }
 
-            let key = format!("{}.narinfo", path_info.nar_hash.to_typed_base32());
+            let key = format!("{}.narinfo", path_info.nar_hash.to_typed_base32().strip_prefix("sha256:").unwrap_or_default());
+            debug!("Checking S3 for key: {}", key);
 
             match self
                 .client
@@ -131,6 +131,46 @@ impl S3Uploader {
         Ok((missing_paths, found_paths))
     }
 
+    /// Lists all .narinfo keys in the S3 bucket.
+    pub async fn list_all_narinfo_keys(&self) -> Result<Vec<String>> {
+        let mut all_keys = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let mut request = self.client.list_objects_v2().bucket(&self.bucket);
+
+            if let Some(token) = continuation_token {
+                request = request.continuation_token(token);
+            }
+
+            let output = request.send().await?;
+
+            if let Some(contents) = output.contents {
+                for object in contents {
+                    if let Some(key) = object.key {
+                        if key.ends_with(".narinfo") {
+                            // Strip "sha256:" prefix if present
+                            let processed_key = if key.starts_with("sha256:") {
+                                key[7..].to_string()
+                            } else {
+                                key
+                            };
+                            all_keys.push(processed_key);
+                        }
+                    }
+                }
+            }
+
+            continuation_token = output.next_continuation_token;
+
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        Ok(all_keys)
+    }
+
     /// Uploads a file to the S3 bucket.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {
         let stream = ByteStream::from_path(file_path).await?;
@@ -146,12 +186,13 @@ impl S3Uploader {
     }
 
     /// Uploads bytes to the S3 bucket.
-    pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
+    pub async fn upload_bytes(&self, bytes: Vec<u8>, hash: &str) -> Result<()> {
+        let key = format!("{}.nar", hash);
         let stream = ByteStream::from(bytes);
         self.client
             .put_object()
             .bucket(&self.bucket)
-            .key(key)
+            .key(&key)
             .body(stream)
             .send()
             .await?;
@@ -159,4 +200,5 @@ impl S3Uploader {
         Ok(())
     }
 }
+'''
 

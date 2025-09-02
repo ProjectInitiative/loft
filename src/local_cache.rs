@@ -112,24 +112,30 @@ impl LocalCache {
 
         debug!("find_existing_hashes: checking for {} hashes.", hashes.len());
 
-        let query_string = format!(
-            "SELECT hash FROM uploaded_paths WHERE hash IN ({})",
-            hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",")
-        );
-        debug!("find_existing_hashes: query string: {}", query_string);
+        // SQLite's WHERE IN clause has a limit on the number of parameters (typically 999).
+        // We'll split the query into chunks to avoid exceeding this limit.
+        const SQLITE_MAX_VARIABLE_NUMBER: usize = 900; // A safe limit
 
-        let mut stmt = conn.prepare(&query_string)?;
+        for chunk in hashes.chunks(SQLITE_MAX_VARIABLE_NUMBER) {
+            let query_string = format!(
+                "SELECT hash FROM uploaded_paths WHERE hash IN ({})",
+                chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+            );
+            debug!("find_existing_hashes: query string: {}", query_string);
 
-        let params: Vec<&dyn rusqlite::ToSql> = hashes
-            .iter()
-            .map(|s| s as &dyn rusqlite::ToSql)
-            .collect();
-        let mut rows = stmt.query(&*params)?;
+            let mut stmt = conn.prepare(&query_string)?;
 
-        while let Some(row) = rows.next()? {
-            let hash: String = row.get(0)?;
-            debug!("find_existing_hashes: found existing hash: {}", hash);
-            existing_hashes.insert(hash);
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .map(|s| s as &dyn rusqlite::ToSql)
+                .collect();
+            let mut rows = stmt.query(&*params)?;
+
+            while let Some(row) = rows.next()? {
+                let hash: String = row.get(0)?;
+                debug!("find_existing_hashes: found existing hash: {}", hash);
+                existing_hashes.insert(hash);
+            }
         }
 
         debug!("find_existing_hashes: found {} existing hashes.", existing_hashes.len());

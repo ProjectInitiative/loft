@@ -23,6 +23,9 @@ pub struct LoftConfig {
     /// Whether to perform an initial scan of the store on startup.
     #[serde(default)]
     pub scan_on_startup: bool,
+    /// Whether to populate the local cache from S3 on startup if the cache is empty.
+    #[serde(default)]
+    pub populate_cache_on_startup: bool,
     /// Optional: Path to your Nix signing key file (e.g., /etc/nix/signing-key.sec)
     /// If provided, uploaded paths will be signed.
     pub signing_key_path: Option<PathBuf>,

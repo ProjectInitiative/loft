@@ -138,8 +138,9 @@ async fn process_path(
         let p = Path::new(p_str);
         let store_path = nix_store.parse_store_path(p)?;
         let path_info = nix_store.query_path_info(store_path).await?;
-        let hash = path_info.nar_hash.to_typed_base32();
-        closure_hashes.push(hash.clone());
+        // Store plain hash in closure_hashes
+        let plain_hash = path_info.nar_hash.to_typed_base32().strip_prefix("sha256:").unwrap_or_default().to_string();
+        closure_hashes.push(plain_hash.clone());
         closure_path_infos.insert(p_str.clone(), path_info);
     }
     debug!("Closure hashes for {}: {:?}", path.display(), closure_hashes);
@@ -154,10 +155,11 @@ async fn process_path(
             .into_iter()
             .filter(|p| {
                 let path_info = closure_path_infos.get(p).unwrap();
-                let hash = path_info.nar_hash.to_typed_base32();
-                let is_missing = !existing_hashes.contains(&hash);
+                // Compare with plain hash
+                let plain_hash = path_info.nar_hash.to_typed_base32().strip_prefix("sha256:").unwrap_or_default().to_string();
+                let is_missing = !existing_hashes.contains(&plain_hash);
                 if !is_missing {
-                    debug!("Path {} (hash {}) found in local cache.", p, hash);
+                    debug!("Path {} (hash {}) found in local cache.", p, plain_hash);
                 }
                 is_missing
             })
@@ -183,9 +185,10 @@ async fn process_path(
     // Add the paths found in the remote cache to the local cache.
     for p_str in found_paths_from_remote {
         let path_info = closure_path_infos.get(&p_str).unwrap();
-        let hash = path_info.nar_hash.to_typed_base32();
-        debug!("Adding remotely found path {} (hash {}) to local cache.", p_str, hash);
-        local_cache.add_path_hash(&hash)?;
+        // Store plain hash in local cache
+        let plain_hash = path_info.nar_hash.to_typed_base32().strip_prefix("sha256:").unwrap_or_default().to_string();
+        debug!("Adding remotely found path {} (hash {}) to local cache.", p_str, plain_hash);
+        local_cache.add_path_hash(&plain_hash)?;
     }
 
     if missing_paths_from_remote.is_empty() {
@@ -212,9 +215,10 @@ async fn process_path(
         nix::upload_nar_for_path(uploader.clone(), p, config).await?;
         // Add the path to the local cache.
         let path_info = closure_path_infos.get(&p_str).unwrap();
-        let hash = path_info.nar_hash.to_typed_base32();
-        debug!("Adding uploaded path {} (hash {}) to local cache.", p.display(), hash);
-        local_cache.add_path_hash(&hash)?;
+        // Store plain hash in local cache
+        let plain_hash = path_info.nar_hash.to_typed_base32().strip_prefix("sha256:").unwrap_or_default().to_string();
+        debug!("Adding uploaded path {} (hash {}) to local cache.", p.display(), plain_hash);
+        local_cache.add_path_hash(&plain_hash)?;
     }
 
     Ok(())
