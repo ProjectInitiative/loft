@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tracing::info;
 
-use crate::s3::S3Uploader;
+use crate::s3_uploader::S3Uploader;
 
 /// Gets the closure of a store path.
 pub fn get_store_path_closure(store_path: &str) -> Result<Vec<String>> {

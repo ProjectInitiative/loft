@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use tracing::info;
 
 mod config;
-mod nix;
-mod s3;
-mod watcher;
+mod nix_utils;
+mod s3_uploader;
+mod nix_store_watcher;
 
 use config::Config;
 
@@ -36,11 +36,11 @@ async fn main() -> Result<()> {
     info!("Configuration loaded successfully.");
 
     // Initialize the S3 uploader.
-    let uploader = s3::S3Uploader::new(&config.s3).await?;
+    let uploader = s3_uploader::S3Uploader::new(&config.s3).await?;
     info!("S3 uploader initialized for bucket '{}'.", config.s3.bucket);
 
     // Start watching the Nix store for new paths.
-    watcher::watch_store(uploader, config.upload_threads).await?;
+    nix_store_watcher::watch_store(uploader, config.upload_threads).await?;
 
     Ok(())
 }

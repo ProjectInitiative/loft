@@ -1,15 +1,14 @@
 //! Watches the Nix store for changes and triggers uploads.
 
 use anyhow::Result;
-use futures::stream::StreamExt;
-use notify::{RecursiveMode, Watcher};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Error as NotifyError, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use crate::nix;
-use crate::s3::S3Uploader;
+use crate::nix_utils as nix;
+use crate::s3_uploader::S3Uploader;
 
 const NIX_STORE_DIR: &str = "/nix/store";
 
@@ -19,7 +18,7 @@ pub async fn watch_store(uploader: S3Uploader, max_concurrency: usize) -> Result
     let uploader = Arc::new(uploader);
     let semaphore = Arc::new(Semaphore::new(max_concurrency));
 
-    let mut watcher = notify::recommended_watcher(move |res| {
+    let mut watcher = notify::recommended_watcher(move |res: Result<Event, NotifyError>| {
         if let Ok(event) = res {
             for path in event.paths {
                 if event.kind.is_remove() && path.extension().map_or(false, |e| e == "lock") {

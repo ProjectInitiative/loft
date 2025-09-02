@@ -17,36 +17,30 @@
         };
 
         # Import the crane library
-        craneLib = crane.lib."${system}".overrideToolchain (
+        craneLib = (crane.mkLib pkgs).overrideToolchain (
           pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
         );
 
         # Build the application using the logic from crane.nix
-        attic-lite = import ./crane.nix {
+        loft = import ./crane.nix {
           inherit pkgs craneLib;
           src = ./.;
         };
       in
       {
         packages = {
-          default = attic-lite;
+          default = loft;
         };
 
         devShells = {
-          default = pkgs.mkShell {
-            inputsFrom = [ attic-lite ];
-
+          default = craneLib.devShell {
             # Additional development tools
-            nativeBuildInputs = with pkgs; [
+            packages = with pkgs; [
               # For interacting with Garage S3
               awscli2
               # For interacting with the Nix store
               nix
             ];
-
-            # Environment variables for rust-analyzer
-            RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
           };
         };
 
