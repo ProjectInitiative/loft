@@ -1,10 +1,12 @@
 //! Handles all interactions with S3-compatible storage.
 
 use anyhow::Result;
+use aws_config::from_env;
+use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::config::S3Config;
 
@@ -17,18 +19,23 @@ pub struct S3Uploader {
 impl S3Uploader {
     /// Creates a new S3 uploader from the given configuration.
     pub async fn new(config: &S3Config) -> Result<Self> {
-        let sdk_config = aws_config::load_from_env().await;
-        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
-            .region(aws_sdk_s3::config::Region::new(config.region.clone()))
+        let config_loader = from_env()
             .endpoint_url(config.endpoint.as_str())
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+            .region(Region::new(config.region.clone()))
+            .credentials_provider(Credentials::new(
                 &config.access_key,
                 &config.secret_key,
                 None,
                 None,
                 "default",
-            ))
+            ));
+
+        let sdk_config = config_loader.load().await;
+
+        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
+            .force_path_style(true)
             .build();
+
         let client = Client::from_conf(s3_config);
 
         Ok(S3Uploader {
@@ -82,6 +89,20 @@ impl S3Uploader {
             .send()
             .await?;
         info!("Successfully uploaded '{}' to '{}'.", file_path.display(), key);
+        Ok(())
+    }
+
+    /// Uploads bytes to the S3 bucket.
+    pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
+        let stream = ByteStream::from(bytes);
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(stream)
+            .send()
+            .await?;
+        info!("Successfully uploaded bytes to '{}'.", key);
         Ok(())
     }
 }

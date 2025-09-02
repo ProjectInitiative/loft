@@ -1,6 +1,7 @@
 //! Watches the Nix store for changes and triggers uploads.
 
 use anyhow::Result;
+use futures::future::join_all;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Error as NotifyError, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,10 +13,41 @@ use crate::s3_uploader::S3Uploader;
 
 const NIX_STORE_DIR: &str = "/nix/store";
 
+/// Scans the Nix store for existing paths and uploads them.
+pub async fn scan_and_process_existing_paths(
+    uploader: Arc<S3Uploader>,
+    max_concurrency: usize,
+) -> Result<()> {
+    let semaphore = Arc::new(Semaphore::new(max_concurrency));
+    let store_dir = Path::new(NIX_STORE_DIR);
+
+    let mut tasks = Vec::new();
+
+    for entry in std::fs::read_dir(store_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        // We are only interested in store paths, which are directories.
+        if path.is_dir() {
+            let uploader_clone = uploader.clone();
+            let semaphore_clone = semaphore.clone();
+            tasks.push(tokio::spawn(async move {
+                let permit = semaphore_clone.acquire_owned().await.unwrap();
+                if let Err(e) = process_path(uploader_clone, &path).await {
+                    error!("Failed to process '{}': {:?}", path.display(), e);
+                }
+                drop(permit);
+            }));
+        }
+    }
+
+    join_all(tasks).await;
+
+    Ok(())
+}
+
 /// Watches the Nix store and uploads new paths.
-pub async fn watch_store(uploader: S3Uploader, max_concurrency: usize) -> Result<()> {
+pub async fn watch_store(uploader: Arc<S3Uploader>, max_concurrency: usize) -> Result<()> {
     let (tx, mut rx) = mpsc::channel(100);
-    let uploader = Arc::new(uploader);
     let semaphore = Arc::new(Semaphore::new(max_concurrency));
 
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, NotifyError>| {
@@ -44,7 +76,7 @@ pub async fn watch_store(uploader: S3Uploader, max_concurrency: usize) -> Result
         tokio::spawn(async move {
             let permit = semaphore_clone.acquire_owned().await.unwrap();
             if let Err(e) = process_path(uploader_clone, &path).await {
-                error!("Failed to process '{}': {}", path.display(), e);
+                error!("Failed to process '{}': {:?}", path.display(), e);
             }
             drop(permit);
         });
@@ -79,4 +111,3 @@ async fn process_path(uploader: Arc<S3Uploader>, path: &Path) -> Result<()> {
 
     Ok(())
 }
-

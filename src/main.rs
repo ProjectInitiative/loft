@@ -5,6 +5,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::info;
 
 mod config;
@@ -36,8 +37,13 @@ async fn main() -> Result<()> {
     info!("Configuration loaded successfully.");
 
     // Initialize the S3 uploader.
-    let uploader = s3_uploader::S3Uploader::new(&config.s3).await?;
+    let uploader = Arc::new(s3_uploader::S3Uploader::new(&config.s3).await?);
     info!("S3 uploader initialized for bucket '{}'.", config.s3.bucket);
+
+    // Scan existing paths and upload them.
+    info!("Scanning existing store paths...");
+    nix_store_watcher::scan_and_process_existing_paths(uploader.clone(), config.upload_threads).await?;
+    info!("Finished scanning existing store paths.");
 
     // Start watching the Nix store for new paths.
     nix_store_watcher::watch_store(uploader, config.upload_threads).await?;
