@@ -8,7 +8,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 use tracing::{error, info};
 
+use attic::nix_store::NixStore;
 use crate::config::Config;
+use crate::local_cache::LocalCache;
 use crate::nix_utils as nix;
 use crate::s3_uploader::S3Uploader;
 
@@ -17,6 +19,7 @@ const NIX_STORE_DIR: &str = "/nix/store";
 /// Scans the Nix store for existing paths and uploads them.
 pub async fn scan_and_process_existing_paths(
     uploader: Arc<S3Uploader>,
+    local_cache: Arc<LocalCache>,
     config: &Config,
 ) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
@@ -30,11 +33,12 @@ pub async fn scan_and_process_existing_paths(
         // We are only interested in store paths, which are directories.
         if path.is_dir() {
             let uploader_clone = uploader.clone();
+            let local_cache_clone = local_cache.clone();
             let semaphore_clone = semaphore.clone();
             let config_for_task = config.clone(); // Clone config for the spawned task
             tasks.push(tokio::spawn(async move {
                 let permit = semaphore_clone.acquire_owned().await.unwrap();
-                if let Err(e) = process_path(uploader_clone, &path, &config_for_task).await {
+                if let Err(e) = process_path(uploader_clone, local_cache_clone, &path, &config_for_task).await {
                     error!("Failed to process '{}': {:?}", path.display(), e);
                 }
                 drop(permit);
@@ -50,6 +54,7 @@ pub async fn scan_and_process_existing_paths(
 /// Watches the Nix store and uploads new paths.
 pub async fn watch_store(
     uploader: Arc<S3Uploader>,
+    local_cache: Arc<LocalCache>,
     config: &Config,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel(100);
@@ -71,16 +76,17 @@ pub async fn watch_store(
         }
     })?;
 
-    watcher.watch(Path::new(NIX_STORE_DIR), RecursiveMode::Recursive)?;
+    watcher.watch(Path::new(NIX_STORE_DIR), RecursiveMode::NonRecursive)?;
     info!("Watching {} for new store paths...", NIX_STORE_DIR);
 
     while let Some(path) = rx.recv().await {
         let uploader_clone = uploader.clone();
+        let local_cache_clone = local_cache.clone();
         let semaphore_clone = semaphore.clone();
         let config_for_task = config.clone(); // Clone config for the spawned task
         tokio::spawn(async move {
             let permit = semaphore_clone.acquire_owned().await.unwrap();
-            if let Err(e) = process_path(uploader_clone, &path, &config_for_task).await {
+            if let Err(e) = process_path(uploader_clone, local_cache_clone, &path, &config_for_task).await {
                 error!("Failed to process '{}': {:?}", path.display(), e);
             }
             drop(permit);
@@ -91,8 +97,14 @@ pub async fn watch_store(
 }
 
 /// Processes a single store path for upload.
-async fn process_path(uploader: Arc<S3Uploader>, path: &Path, config: &Config) -> Result<()> {
+async fn process_path(
+    uploader: Arc<S3Uploader>,
+    local_cache: Arc<LocalCache>,
+    path: &Path,
+    config: &Config,
+) -> Result<()> {
     let path_str = path.to_str().unwrap_or("").to_string();
+    let nix_store = NixStore::connect()?;
 
     // 1. Get the closure of the path.
     let closure = nix::get_store_path_closure(&path_str)?;
@@ -111,21 +123,65 @@ async fn process_path(uploader: Arc<S3Uploader>, path: &Path, config: &Config) -
         }
     }
 
-    // 2. Check which paths are missing from the cache.
-    let missing_paths = uploader.check_paths_exist(&closure, config).await?;
+    // 2. Check which paths are missing from the local cache.
+    let mut closure_hashes = Vec::new();
+    let mut closure_path_infos = std::collections::HashMap::new();
+    for p_str in &closure {
+        let p = Path::new(p_str);
+        let store_path = nix_store.parse_store_path(p)?;
+        let path_info = nix_store.query_path_info(store_path).await?;
+        let hash = path_info.nar_hash.to_typed_base32();
+        closure_hashes.push(hash.clone());
+        closure_path_infos.insert(p_str.clone(), path_info);
+    }
 
-    if missing_paths.is_empty() {
-        info!("All paths in the closure of '{}' are already cached.", path.display());
+    let existing_hashes = local_cache.find_existing_hashes(&closure_hashes)?;
+    let missing_paths_from_local: Vec<String> = closure
+        .into_iter()
+        .filter(|p| {
+            let path_info = closure_path_infos.get(p).unwrap();
+            let hash = path_info.nar_hash.to_typed_base32();
+            !existing_hashes.contains(&hash)
+        })
+        .collect();
+
+    if missing_paths_from_local.is_empty() {
+        info!(
+            "All paths in the closure of '{}' are already in the local cache.",
+            path.display()
+        );
         return Ok(());
     }
 
-    info!("Found {} missing paths to upload.", missing_paths.len());
+    // 3. Check which of the remaining paths are missing from the remote cache.
+    let missing_paths_from_remote = uploader
+        .check_paths_exist(&missing_paths_from_local, config)
+        .await?;
 
-    // 3. Upload each missing path.
-    for p_str in missing_paths {
+    if missing_paths_from_remote.is_empty() {
+        info!(
+            "All paths in the closure of '{}' are already in the remote cache.",
+            path.display()
+        );
+        // Add the paths to the local cache so we don't check them again.
+        local_cache.add_many_path_hashes(&closure_hashes)?;
+        return Ok(());
+    }
+
+    info!(
+        "Found {} missing paths to upload.",
+        missing_paths_from_remote.len()
+    );
+
+    // 4. Upload each missing path.
+    for p_str in missing_paths_from_remote {
         let p = Path::new(&p_str);
         // Upload NAR, then .narinfo
         nix::upload_nar_for_path(uploader.clone(), p, config).await?;
+        // Add the path to the local cache.
+        let path_info = closure_path_infos.get(&p_str).unwrap();
+        let hash = path_info.nar_hash.to_typed_base32();
+        local_cache.add_path_hash(&hash)?;
     }
 
     Ok(())

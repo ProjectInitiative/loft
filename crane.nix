@@ -1,22 +1,26 @@
-# This file contains the core logic for building the Rust crate with crane.
-{ pkgs, craneLib, src }:
-
-craneLib.buildPackage {
-  inherit src;
-
-  # Dependencies needed by the crate at build time
-  nativeBuildInputs = with pkgs; [
+# crane.nix
+{ pkgs, craneLib, src, attic }:
+let
+  # Get the Nix libraries that attic needs without the cargo vendoring conflicts
+  nixLibs = with pkgs; [
+    nix
+    nlohmann_json
+    boost
+    brotli
+    libsodium
+    sqlite
     pkg-config
   ];
-
-  buildInputs = with pkgs; [
-    openssl # Common dependency for HTTP clients
-  ];
-
-  # You can add tests here if you have them
-  # doCheck = true;
-  # cargoCheckCommand = ''
-  #   cargo test -- --nocapture
-  # '';
+in
+craneLib.buildPackage {
+  inherit src;
+  
+  nativeBuildInputs = [ pkgs.pkg-config ];
+  buildInputs = nixLibs;
+  
+  # Ensure pkg-config can find the Nix libraries
+  PKG_CONFIG_PATH = "${pkgs.nix}/lib/pkgconfig";
+  
+  # Prevent cargo config duplication by using our own vendoring
+  cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
 }
-

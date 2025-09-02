@@ -26,6 +26,7 @@
         loft = import ./crane.nix {
           inherit pkgs craneLib;
           src = ./.;
+          attic = attic-flake.packages.${system}.default;
         };
       in
       {
