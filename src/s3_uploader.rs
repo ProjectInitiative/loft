@@ -212,17 +212,27 @@ impl S3Uploader {
     }
 
     /// Uploads bytes to the S3 bucket.
-    pub async fn upload_bytes(&self, bytes: Vec<u8>, hash: &str) -> Result<()> {
-        let key = format!("{}.nar", hash);
+    pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
         let stream = ByteStream::from(bytes);
         self.client
             .put_object()
             .bucket(&self.bucket)
-            .key(&key)
+            .key(key)
             .body(stream)
             .send()
             .await?;
         info!("Successfully uploaded bytes to '{}'.", key);
+        Ok(())
+    }
+
+    /// Uploads the nix-cache-info file to the root of the bucket.
+    pub async fn upload_nix_cache_info(&self) -> Result<()> {
+        let content = format!(
+            "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\nCompression: xz\n"
+        );
+        let key = "nix-cache-info";
+        self.upload_bytes(content.into_bytes(), key).await?;
+        info!("Successfully uploaded 'nix-cache-info' to '{}'.", key);
         Ok(())
     }
 }

@@ -92,6 +92,9 @@ async fn main() -> Result<()> {
         config.s3.bucket
     );
 
+    // Upload nix-cache-info file.
+    uploader.upload_nix_cache_info().await?;
+
     if args.populate_cache {
         populate_local_cache_from_s3(uploader.clone(), local_cache.clone()).await?;
         return Ok(());

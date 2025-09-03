@@ -9,6 +9,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{info, warn, debug};
 use futures::stream::StreamExt;
+use xz2::read::XzEncoder; // Added this line
+use std::io::Read; // Added this line
+use sha2::{Sha256, Digest}; // Added this line
+use hex::encode; // Added this line
 
 use attic::nix_store::NixStore; // Keep NixStore
 use attic::signing::NixKeypair; // Added this line
@@ -53,7 +57,8 @@ pub async fn get_nar_info(store_path: &Path) -> Result<String> {
     let mut nar_info_content = String::new();
     nar_info_content.push_str(&format!("StorePath: {}
 ", path_info.path.as_os_str().to_string_lossy().to_string()));
-    nar_info_content.push_str(&format!("URL: nar/{}.nar
+    // Update URL to reflect xz compression and nar/ subdirectory
+    nar_info_content.push_str(&format!("URL: nar/{}.nar.xz
 ", path_info.nar_hash.to_typed_base32()));
     nar_info_content.push_str("Compression: xz
 "); // Assuming xz compression
@@ -97,7 +102,13 @@ pub async fn upload_nar_for_path(uploader: Arc<S3Uploader>, path: &Path, config:
     let nar_bytes = dump_nar_to_bytes(path).await?;
     info!("Created NAR for '{}' in memory.", path.display());
 
-    // 2. Generate and upload the .narinfo with retry logic.
+    // 2. Compress the NAR bytes with xz.
+    let mut encoder = XzEncoder::new(&nar_bytes[..], 9); // Compression level 9
+    let mut compressed_nar_bytes = Vec::new();
+    encoder.read_to_end(&mut compressed_nar_bytes)?;
+    info!("Compressed NAR for '{}' with xz.", path.display());
+
+    // 3. Generate and upload the .narinfo with retry logic.
     let mut nar_info_content = get_nar_info(path).await?;
 
     // Sign the path if signing is enabled.
@@ -112,11 +123,12 @@ pub async fn upload_nar_for_path(uploader: Arc<S3Uploader>, path: &Path, config:
         nar_info_content = nix_manifest::to_string(&nar_info)?;
     }
 
-    let nar_key = format!("{}.nar", nar_hash_str);
+    // Update NAR key to include nar/ prefix and .xz suffix
+    let nar_key = format!("nar/{}.nar.xz", nar_hash_str);
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match uploader.upload_bytes(nar_bytes.clone(), &nar_key).await {
+        match uploader.upload_bytes(compressed_nar_bytes.clone(), &nar_key).await { // Use compressed_nar_bytes
             Ok(_) => break,
             Err(e) => {
                 if attempts >= 3 {
@@ -133,7 +145,13 @@ pub async fn upload_nar_for_path(uploader: Arc<S3Uploader>, path: &Path, config:
         }
     }
 
-    let narinfo_key = format!("{}.narinfo", nar_hash_str);
+    // Calculate the hash of the nar_info_content for the .narinfo filename
+    let mut hasher = Sha256::new();
+    hasher.update(&nar_info_content);
+    let narinfo_content_hash = hasher.finalize();
+    let narinfo_content_hash_str = encode(narinfo_content_hash);
+
+    let narinfo_key = format!("{}.narinfo", narinfo_content_hash_str); // Use the content hash for the filename
     let mut attempts = 0;
     loop {
         attempts += 1;

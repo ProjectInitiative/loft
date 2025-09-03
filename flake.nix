@@ -80,6 +80,26 @@ EOF
                 echo "bucket_name = $S3_BUCKET" >> "$RCLONE_CONFIG_DIR/rclone.conf"
               fi
 
+              cat >> "$RCLONE_CONFIG_DIR/rclone.conf" << EOF
+[s3-test]
+type = s3
+access_key_id = $AWS_ACCESS_KEY_ID
+secret_access_key = $AWS_SECRET_ACCESS_KEY
+EOF
+              if [ -n "$S3_ENDPOINT" ]; then
+                echo "provider = Other" >> "$RCLONE_CONFIG_DIR/rclone.conf"
+              else
+                echo "provider = AWS" >> "$RCLONE_CONFIG_DIR/rclone.conf"
+              fi
+              cat >> "$RCLONE_CONFIG_DIR/rclone.conf" << EOF
+s3_force_path_style = true
+EOF
+              # Add endpoint and bucket if they exist in environment variables
+              if [ -n "$S3_ENDPOINT" ]; then
+                echo "endpoint = $S3_ENDPOINT" >> "$RCLONE_CONFIG_DIR/rclone.conf"
+              fi
+              echo "bucket_name = nix-cache-test" >> "$RCLONE_CONFIG_DIR/rclone.conf"
+
               export RCLONE_CONFIG="$RCLONE_CONFIG_DIR/rclone.conf"
               echo "rclone config generated at $RCLONE_CONFIG"
 
