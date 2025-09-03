@@ -91,12 +91,7 @@ pub async fn dump_nar_to_bytes(store_path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Uploads the NAR and .narinfo for a given store path.
-pub async fn upload_nar_for_path(uploader: Arc<S3Uploader>, path: &Path, config: &Config) -> Result<()> {
-    let store_hash = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.split('-').next().unwrap_or(""))
-        .unwrap_or("");
+pub async fn upload_nar_for_path(uploader: Arc<S3Uploader>, path: &Path, config: &Config, nar_hash_str: &str) -> Result<()> {
 
     // 1. Dump the NAR to bytes in memory.
     let nar_bytes = dump_nar_to_bytes(path).await?;
@@ -117,7 +112,7 @@ pub async fn upload_nar_for_path(uploader: Arc<S3Uploader>, path: &Path, config:
         nar_info_content = nix_manifest::to_string(&nar_info)?;
     }
 
-    let nar_key = format!("{}.nar", store_hash);
+    let nar_key = format!("{}.nar", nar_hash_str);
     let mut attempts = 0;
     loop {
         attempts += 1;
@@ -138,7 +133,7 @@ pub async fn upload_nar_for_path(uploader: Arc<S3Uploader>, path: &Path, config:
         }
     }
 
-    let narinfo_key = format!("{}.narinfo", store_hash);
+    let narinfo_key = format!("{}.narinfo", nar_hash_str);
     let mut attempts = 0;
     loop {
         attempts += 1;

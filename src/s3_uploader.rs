@@ -7,7 +7,8 @@ use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+use http::StatusCode;
 
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
@@ -19,7 +20,7 @@ pub struct S3Uploader {
     nix_store: NixStore,
 }
 
-'''impl S3Uploader {
+impl S3Uploader {
     /// Creates a new S3 uploader from the given configuration.
     pub async fn new(config: &S3Config) -> Result<Self> {
         let access_key = config.access_key.clone().or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok());
@@ -109,21 +110,46 @@ pub struct S3Uploader {
             let key = format!("{}.narinfo", path_info.nar_hash.to_typed_base32().strip_prefix("sha256:").unwrap_or_default());
             debug!("Checking S3 for key: {}", key);
 
-            match self
+            let head_object_result = self
                 .client
                 .head_object()
                 .bucket(&self.bucket)
                 .key(&key)
                 .send()
-                .await
-            {
+                .await;
+
+            let head_object_result = self
+                .client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .send()
+                .await;
+
+            match head_object_result {
                 Ok(_) => {
                     info!("'{}' already exists in the cache. Skipping.", path_str);
                     found_paths.push(path_str.clone());
                 }
                 Err(e) => {
-                    info!("'{}' not found in cache. Will upload.", path_str);
-                    debug!("Cache check failed for path '{}' with key '{}': {}", path_str, key, e);
+                    // Log the full error for debugging.
+                    debug!("HeadObject for key '{}' failed: {:?}", key, e);
+                    // Check if the error is a NotFound error.
+                    // The specific error type might vary based on the S3-compatible service.
+                    // For AWS S3, a NotFound error typically manifests as a 404 HTTP status code.
+                    let is_not_found = if let aws_sdk_s3::error::SdkError::ServiceError(service_error) = &e {
+                        service_error.raw().status() == StatusCode::NOT_FOUND.into()
+                    } else {
+                        false
+                    };
+
+                    if is_not_found {
+                        info!("'{}' not found in cache. Will upload.", path_str);
+                    } else {
+                        // Log other types of errors as warnings, as they might indicate
+                        // temporary issues or misconfigurations.
+                        warn!("Unexpected error during cache check for path '{}' with key '{}': {:?}", path_str, key, e);
+                    }
                     missing_paths.push(path_str.clone());
                 }
             }
@@ -200,5 +226,5 @@ pub struct S3Uploader {
         Ok(())
     }
 }
-'''
+
 

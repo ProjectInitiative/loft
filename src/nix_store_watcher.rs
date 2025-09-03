@@ -211,15 +211,13 @@ async fn process_path(
     for p_str in missing_paths_from_remote {
         let p = Path::new(&p_str);
         debug!("Uploading path: {}", p.display());
-        // Upload NAR, then .narinfo
-        nix::upload_nar_for_path(uploader.clone(), p, config).await?;
-        // Add the path to the local cache.
         let path_info = closure_path_infos.get(&p_str).unwrap();
-        // Store plain hash in local cache
         let plain_hash = path_info.nar_hash.to_typed_base32().strip_prefix("sha256:").unwrap_or_default().to_string();
+        // Upload NAR, then .narinfo
+        nix::upload_nar_for_path(uploader.clone(), p, config, &plain_hash).await?;
+        // Add the path to the local cache.
         debug!("Adding uploaded path {} (hash {}) to local cache.", p.display(), plain_hash);
         local_cache.add_path_hash(&plain_hash)?;
     }
-
     Ok(())
 }

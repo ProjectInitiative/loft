@@ -2069,6 +2069,7 @@ dependencies = [
  "displaydoc",
  "ed25519-compact",
  "futures",
+ "http 0.2.12",
  "itoa",
  "notify",
  "rusqlite",

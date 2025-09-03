@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
     info!("Configuration loaded successfully.");
 
     // Initialize the S3 uploader.
-    let uploader = Arc::new(s3_uploader::S3Uploader::new(&config.s3).await?);
+    let uploader: Arc<s3_uploader::S3Uploader> = Arc::new(s3_uploader::S3Uploader::new(&config.s3).await?);
     info!(
         "S3 uploader initialized for bucket '{}'.",
         config.s3.bucket

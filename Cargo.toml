@@ -27,5 +27,6 @@ ryu = "1.0.17"
 serde_with = "3.14.0"
 ed25519-compact = "2.1.1"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
+http = "0.2"
 
 

@@ -1,7 +1,7 @@
 //! Manages a local SQLite cache of uploaded paths.
 
 use anyhow::Result;
-use rusqlite::{Connection, params, ToSql};
+use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::Mutex;
 use tracing::{info,debug};
