@@ -101,7 +101,7 @@ pub async fn watch_store(
 }
 
 /// Processes a single store path for upload.
-async fn process_path(
+pub async fn process_path(
     uploader: Arc<S3Uploader>,
     local_cache: Arc<LocalCache>,
     path: &Path,

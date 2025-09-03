@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, Level, debug};
+use tracing::{info, Level, debug, error};
 
 mod config;
 mod nix_store_watcher;
@@ -17,6 +17,7 @@ mod local_cache;
 
 use config::Config;
 use local_cache::LocalCache;
+use nix_store_watcher::process_path; // Import process_path
 
 /// Command-line arguments for Loft.
 #[derive(Parser, Debug)]
@@ -45,6 +46,10 @@ struct Args {
     /// Populate the local cache from S3.
     #[arg(long)]
     populate_cache: bool,
+
+    /// Manually upload a specific Nix store path. Can be specified multiple times.
+    #[arg(long, value_name = "PATH")]
+    upload_path: Option<Vec<PathBuf>>,
 }
 
 #[tokio::main]
@@ -94,6 +99,31 @@ async fn main() -> Result<()> {
 
     // Upload nix-cache-info file.
     uploader.upload_nix_cache_info().await?;
+
+    // Handle manual path uploads
+    if let Some(paths_to_upload) = args.upload_path {
+        info!("Manually uploading specified paths...");
+        let local_cache_clone = local_cache.clone();
+        let uploader_clone = uploader.clone();
+        let config_clone = config.clone();
+
+        for path in paths_to_upload {
+            info!("Processing manual upload path: {}", path.display());
+            if let Err(e) = process_path(
+                uploader_clone.clone(),
+                local_cache_clone.clone(),
+                &path,
+                &config_clone,
+                true, // Force scan for manual uploads
+            )
+            .await
+            {
+                error!("Failed to manually upload '{}': {:?}", path.display(), e);
+            }
+        }
+        info!("Finished manual uploads.");
+        return Ok(()); // Exit after manual uploads
+    }
 
     if args.populate_cache {
         populate_local_cache_from_s3(uploader.clone(), local_cache.clone()).await?;

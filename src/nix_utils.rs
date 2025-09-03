@@ -151,7 +151,13 @@ pub async fn upload_nar_for_path(uploader: Arc<S3Uploader>, path: &Path, config:
     let narinfo_content_hash = hasher.finalize();
     let narinfo_content_hash_str = encode(narinfo_content_hash);
 
-    let narinfo_key = format!("{}.narinfo", narinfo_content_hash_str); // Use the content hash for the filename
+    // Get the store path object to extract its hash for the .narinfo filename
+    let nix_store = NixStore::connect()?; // Re-connect to NixStore if not already in scope
+    let store_path_obj = nix_store.parse_store_path(path)?;
+    let store_path_hash_prefix = store_path_obj.to_hash().to_string(); // Get the hash part of the store path
+
+    // The .narinfo filename should be the hash of the store path it describes
+    let narinfo_key = format!("{}.narinfo", store_path_hash_prefix);
     let mut attempts = 0;
     loop {
         attempts += 1;

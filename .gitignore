@@ -9,7 +9,7 @@ Cargo.lock
 
 #Config
 loft.toml
-attic/
+# attic/
 
 #env
 .direnv
