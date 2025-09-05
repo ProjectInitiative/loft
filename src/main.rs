@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error, info, Level};
+use tracing::{debug, error, info};
 
 use loft::{config, local_cache, nix_store_watcher, s3_uploader};
 
@@ -49,17 +49,24 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize the logging framework.
+    use tracing_subscriber::prelude::*;
+    let subscriber = tracing_subscriber::registry().with(console_subscriber::spawn());
+
     // Parse command-line arguments.
     let args = Args::parse();
 
-    // Initialize the logging framework.
-    let subscriber = tracing_subscriber::fmt();
+    let fmt_layer = tracing_subscriber::fmt::layer();
 
-    if args.debug {
-        subscriber.with_max_level(Level::DEBUG).init();
+    let filter = if args.debug {
+        tracing_subscriber::EnvFilter::new("loft=debug,tower=debug")
     } else {
-        subscriber.with_max_level(Level::INFO).init(); // Default to INFO
-    }
+        tracing_subscriber::EnvFilter::new("loft=info,tower=info")
+    };
+
+    let subscriber = subscriber.with(fmt_layer.with_filter(filter));
+
+    tracing::subscriber::set_global_default(subscriber)?;
 
     // Initialize the local cache.
     let local_cache = Arc::new(LocalCache::new(&PathBuf::from(".loft_cache.db"))?);

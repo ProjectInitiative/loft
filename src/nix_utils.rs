@@ -295,10 +295,13 @@ pub async fn upload_nar_for_path(
         let nar_bytes = dump_nar_to_bytes(path).await?;
         info!("Created NAR for '{}' in memory.", path.display());
 
-        // 2. Compress the NAR bytes with xz.
-        let mut encoder = XzEncoder::new(&nar_bytes[..], 9); // Compression level 9
-        let mut compressed_nar_bytes = Vec::new();
-        encoder.read_to_end(&mut compressed_nar_bytes)?;
+        // 2. Compress the NAR bytes with xz in a blocking thread.
+        let compressed_nar_bytes = tokio::task::spawn_blocking(move || {
+            let mut encoder = XzEncoder::new(&nar_bytes[..], 9);
+            let mut compressed = Vec::new();
+            encoder.read_to_end(&mut compressed)?;
+            Ok::<_, anyhow::Error>(compressed)
+        }).await??;
         info!("Compressed NAR for '{}' with xz.", path.display());
 
         // 3. Upload the compressed NAR from memory

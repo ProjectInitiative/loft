@@ -6,7 +6,7 @@ use notify::{Error as NotifyError, Event, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{error, info};
 
 use crate::cache_checker::CacheChecker;
@@ -91,14 +91,45 @@ pub async fn scan_and_process_existing_paths(
 
         tasks.push(tokio::spawn(async move {
             let permit = semaphore_clone.acquire_owned().await.unwrap();
-            let p = Path::new(&path_str);
+            let (tx, rx) = oneshot::channel();
 
-            if let Err(e) =
-                nix::upload_nar_for_path(uploader_clone, p, &config_clone, &plain_hash).await
-            {
-                error!("Failed to upload path {}: {:?}", path_str, e);
-            } else if let Err(e) = local_cache_clone.add_path_hash(&plain_hash) {
-                error!("Failed to add path {} to local cache: {:?}", path_str, e);
+            let p = Path::new(&path_str).to_path_buf();
+            let uploader_clone_block = uploader_clone.clone();
+            let config_clone_block = config_clone.clone();
+            let plain_hash_clone_block = plain_hash.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let result = rt.block_on(async {
+                    nix::upload_nar_for_path(
+                        uploader_clone_block,
+                        &p,
+                        &config_clone_block,
+                        &plain_hash_clone_block,
+                    )
+                    .await
+                });
+                let _ = tx.send(result);
+            });
+
+            match rx.await {
+                Ok(Ok(_)) => {
+                    if let Err(e) = local_cache_clone.add_path_hash(&plain_hash) {
+                        error!(
+                            "Failed to add path {} to local cache: {:?}",
+                            path_str, e
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    error!("Failed to upload path {}: {:?}", path_str, e);
+                }
+                Err(_) => {
+                    error!("Upload task for path {} failed unexpectedly (thread panicked).", path_str);
+                }
             }
             drop(permit);
         }));
@@ -175,36 +206,90 @@ pub async fn process_path(
     force_scan: bool,
 ) -> Result<()> {
     let path_str = path.to_str().unwrap_or("").to_string();
-    let nix_store = NixStore::connect()?;
 
-    // 1. Get closure
-    let closure = nix::get_store_path_closure(&path_str).await?;
+    // 1. Filter the path
+    let keys_to_skip = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
+    let sigs_map = nix::get_path_signatures(vec![path_str.clone()]).await?;
+    let filtered_paths = nix::filter_out_sig_keys(sigs_map, keys_to_skip.clone()).await?;
 
-    // 2. Skip signed-by keys if necessary
-    if let Some(keys_to_skip) = &config.loft.skip_signed_by_keys {
-        if let Some(sig_key) = nix::get_path_signature_key(&path_str).await? {
-            if keys_to_skip.contains(&sig_key) {
-                info!("Skipping {} (signed by {})", path.display(), sig_key);
-                return Ok(());
-            }
-        }
+    if filtered_paths.is_empty() {
+        info!("Skipping path: {}", path.display());
+        return Ok(());
     }
 
-    // 3. Check caches
-    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
-    let result = checker.check_paths(&nix_store, closure, force_scan).await?;
+    // 2. Get closure
+    let closure = nix::get_store_path_closure(&path_str).await?;
 
-    // 4. Upload missing
+    // 3. Get signatures for the closure and filter again
+    let closure_signatures =
+        nix::get_path_signatures(closure.into_iter().collect()).await?;
+    let filtered_closure_paths =
+        nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
+    let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
+    info!(
+        "Total paths after filtering closure for {}: {}",
+        path.display(),
+        filtered_closure_vec.len()
+    );
+
+    // 4. Check caches
+    let nix_store = NixStore::connect()?;
+    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
+    let result = checker
+        .check_paths(&nix_store, filtered_closure_vec, force_scan)
+        .await?;
+
+    // 5. Upload missing
     for (path_str, path_info) in result.to_upload {
+        let uploader_clone = uploader.clone();
+        let local_cache_clone = local_cache.clone();
+        let config_clone = config.clone();
         let plain_hash = path_info
             .nar_hash
             .to_typed_base32()
             .strip_prefix("sha256:")
             .unwrap_or_default()
             .to_string();
-        nix::upload_nar_for_path(uploader.clone(), Path::new(&path_str), config, &plain_hash)
-            .await?;
-        local_cache.add_path_hash(&plain_hash)?;
+
+        let (tx, rx) = oneshot::channel();
+        let p = Path::new(&path_str).to_path_buf();
+        let uploader_clone_block = uploader_clone.clone();
+        let config_clone_block = config_clone.clone();
+        let plain_hash_clone_block = plain_hash.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = rt.block_on(async {
+                nix::upload_nar_for_path(
+                    uploader_clone_block,
+                    &p,
+                    &config_clone_block,
+                    &plain_hash_clone_block,
+                )
+                .await
+            });
+            let _ = tx.send(result);
+        });
+
+        match rx.await {
+            Ok(Ok(_)) => {
+                if let Err(e) = local_cache_clone.add_path_hash(&plain_hash) {
+                    error!(
+                        "Failed to add path {} to local cache: {:?}",
+                        path_str, e
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                error!("Failed to upload path {}: {:?}", path_str, e);
+            }
+            Err(_) => {
+                error!("Upload task for path {} failed unexpectedly (thread panicked).", path_str);
+            }
+        }
     }
 
     Ok(())

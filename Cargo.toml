@@ -19,7 +19,7 @@ tempfile = "3.21.0"
 tokio = { version = "1.38.0", features = ["full"] }
 toml = "0.8.14"
 tracing = "0.1.40"
-tracing-subscriber = "0.3.18"
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "registry", "env-filter"] }
 attic = { git = "https://github.com/zhaofengli/attic", branch = "main" }
 displaydoc = "0.2.5"
 itoa = "1.0.11"
@@ -32,5 +32,6 @@ xz2 = "0.1.0"
 sha2 = "0.10.8"
 hex = "0.4.3"
 redb = "3.0.1"
+console-subscriber = "0.4.1"
 
 
