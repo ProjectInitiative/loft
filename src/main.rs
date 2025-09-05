@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
     info!("S3 uploader initialized for bucket '{}'.", config.s3.bucket);
 
     // Upload nix-cache-info file.
-    uploader.upload_nix_cache_info().await?;
+    uploader.upload_nix_cache_info(&config).await?;
 
     // Handle manual path uploads
     if let Some(paths_to_upload) = args.upload_path {

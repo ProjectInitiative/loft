@@ -11,9 +11,15 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
+use aws_sdk_s3::types::CompletedPart;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
 use attic::nix_store::StorePath;
+
+const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
 
 /// A client for uploading files to an S3 bucket.
 pub struct S3Uploader {
@@ -279,42 +285,198 @@ impl S3Uploader {
         Ok(final_content)
     }
 
-    /// Legacy method for uploading regular files (not store paths)
+    /// Uploads a file to S3, using multipart upload for large files.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {
-        let stream = ByteStream::from_path(file_path).await?;
-        self.client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .body(stream)
-            .send()
-            .await?;
-        info!(
-            "Successfully uploaded '{}' to '{}'.",
-            file_path.display(),
-            key
-        );
+        let file_size = tokio::fs::metadata(file_path).await?.len();
+
+        if file_size < MIN_MULTIPART_UPLOAD_SIZE {
+            // Use single PUT for small files
+            let stream = ByteStream::from_path(file_path).await?;
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .body(stream)
+                .send()
+                .await?;
+            info!(
+                "Successfully uploaded '{}' to '{}' using single PUT.",
+                file_path.display(),
+                key
+            );
+        } else {
+            // Use multipart upload for large files
+            info!(
+                "Initiating multipart upload for '{}' ({} bytes).",
+                file_path.display(),
+                file_size
+            );
+
+            let multipart_upload_res = self
+                .client
+                .create_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await?;
+
+            let upload_id = multipart_upload_res
+                .upload_id
+                .ok_or_else(|| anyhow::anyhow!("Failed to get upload ID"))?;
+
+            let mut parts: Vec<CompletedPart> = Vec::new();
+            let mut file = File::open(file_path).await?;
+            let mut part_number = 1;
+            let mut bytes_read = 0;
+
+            while bytes_read < file_size {
+                let mut buffer = vec![0; MIN_MULTIPART_UPLOAD_SIZE as usize];
+                let read_len = file.read(&mut buffer).await?;
+
+                if read_len == 0 {
+                    break; // End of file
+                }
+
+                let chunk = &buffer[..read_len];
+                let stream = ByteStream::from(chunk.to_vec());
+
+                let upload_part_res = self
+                    .client
+                    .upload_part()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .part_number(part_number)
+                    .body(stream)
+                    .send()
+                    .await?;
+
+                parts.push(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(upload_part_res.e_tag.unwrap_or_default())
+                        .build(),
+                );
+
+                bytes_read += read_len as u64;
+                part_number += 1;
+            }
+
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .multipart_upload(
+                    aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                        .set_parts(Some(parts))
+                        .build(),
+                )
+                .send()
+                .await?;
+
+            info!(
+                "Successfully uploaded '{}' to '{}' using multipart upload.",
+                file_path.display(),
+                key
+            );
+        }
         Ok(())
     }
 
-    /// Uploads bytes to the S3 bucket.
+    /// Uploads bytes to the S3 bucket, using multipart upload for large byte arrays.
     pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
-        let stream = ByteStream::from(bytes);
-        self.client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .body(stream)
-            .send()
-            .await?;
-        info!("Successfully uploaded bytes to '{}'.", key);
+        let bytes_len = bytes.len() as u64;
+
+        if bytes_len < MIN_MULTIPART_UPLOAD_SIZE {
+            // Use single PUT for small byte arrays
+            let stream = ByteStream::from(bytes);
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .body(stream)
+                .send()
+                .await?;
+            info!("Successfully uploaded bytes to '{}' using single PUT.", key);
+        } else {
+            // Use multipart upload for large byte arrays
+            info!(
+                "Initiating multipart upload for bytes ({} bytes).",
+                bytes_len
+            );
+
+            let multipart_upload_res = self
+                .client
+                .create_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await?;
+
+            let upload_id = multipart_upload_res
+                .upload_id
+                .ok_or_else(|| anyhow::anyhow!("Failed to get upload ID"))?;
+
+            let mut parts: Vec<CompletedPart> = Vec::new();
+            let mut current_pos = 0;
+            let mut part_number = 1;
+
+            while current_pos < bytes_len {
+                let end_pos = (current_pos + MIN_MULTIPART_UPLOAD_SIZE).min(bytes_len);
+                let chunk = &bytes[current_pos as usize..end_pos as usize];
+                let stream = ByteStream::from(chunk.to_vec());
+
+                let upload_part_res = self
+                    .client
+                    .upload_part()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .part_number(part_number)
+                    .body(stream)
+                    .send()
+                    .await?;
+
+                parts.push(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(upload_part_res.e_tag.unwrap_or_default())
+                        .build(),
+                );
+
+                current_pos = end_pos;
+                part_number += 1;
+            }
+
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .multipart_upload(
+                    aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                        .set_parts(Some(parts))
+                        .build(),
+                )
+                .send()
+                .await?;
+
+            info!("Successfully uploaded bytes to '{}' using multipart upload.", key);
+        }
         Ok(())
     }
 
     /// Uploads the nix-cache-info file to the root of the bucket.
-    pub async fn upload_nix_cache_info(&self) -> Result<()> {
-        let content =
-            format!("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\nCompression: xz\n");
+    pub async fn upload_nix_cache_info(&self, config: &crate::config::Config) -> Result<()> {
+        let compression_str = match config.loft.compression {
+            crate::config::Compression::Xz => "xz",
+            crate::config::Compression::Zstd => "zstd",
+        };
+        let content = format!(
+            "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\nCompression: {}\n",
+            compression_str
+        );
         let key = "nix-cache-info";
         self.upload_bytes(content.into_bytes(), key).await?;
         info!("Successfully uploaded 'nix-cache-info' to '{}'.", key);

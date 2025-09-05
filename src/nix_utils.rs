@@ -8,7 +8,7 @@ use std::path::Path;
 use futures::stream::StreamExt;
 use serde_json::Value;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use tokio::io::AsyncWriteExt;
 use tempfile::NamedTempFile;
 use std::sync::Arc;
@@ -16,12 +16,13 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
-use xz2::read::XzEncoder; // Added this line // Added this line
+use xz2::read::XzEncoder;
+use zstd::stream::write::Encoder as ZstdEncoder;
 
 use attic::nix_store::NixStore; // Keep NixStore
 use attic::signing::NixKeypair; // Added this line
 
-use crate::config::Config;
+use crate::config::{Config, Compression};
 use crate::nix_manifest::{self, NarInfo};
 use crate::s3_uploader::S3Uploader;
 
@@ -171,7 +172,7 @@ pub async fn get_store_paths_closure(store_paths: Vec<String>) -> Result<Vec<Str
 }
 
 /// Gets the .narinfo for a store path.
-pub async fn get_nar_info(store_path: &Path) -> Result<String> {
+pub async fn get_nar_info(store_path: &Path, config: &Config) -> Result<String> {
     let nix_store = NixStore::connect()?;
     let store_path_obj = nix_store.parse_store_path(store_path)?;
 
@@ -183,11 +184,16 @@ pub async fn get_nar_info(store_path: &Path) -> Result<String> {
         path_info.path.as_os_str().to_string_lossy().to_string()
     ));
     // Update URL to reflect xz compression and nar/ subdirectory
+    let compression_str = match config.loft.compression {
+        Compression::Xz => "xz",
+        Compression::Zstd => "zstd",
+    };
     nar_info_content.push_str(&format!(
-        "URL: nar/{}.nar.xz\n",
-        path_info.nar_hash.to_typed_base32()
+        "URL: nar/{}.nar.{}\n",
+        path_info.nar_hash.to_typed_base32(),
+        compression_str
     ));
-    nar_info_content.push_str("Compression: xz\n"); // Assuming xz compression
+    nar_info_content.push_str(&format!("Compression: {}\n", compression_str));
     nar_info_content.push_str(&format!(
         "NarHash: {}\n",
         path_info.nar_hash.to_typed_base32()
@@ -259,16 +265,30 @@ pub async fn upload_nar_for_path(
         let compressed_temp_file = NamedTempFile::new()?;
         let compressed_path = compressed_temp_file.path().to_path_buf();
         let nar_path = nar_temp_file.path().to_path_buf();
+        let compression_type = config.loft.compression; // Capture compression type
 
+        let nar_path_clone = nar_path.clone(); // Clone here
         tokio::task::spawn_blocking(move || {
-            let nar_file = std::fs::File::open(nar_path)?;
-            let mut encoder = XzEncoder::new(nar_file, 9);
+            
             let compressed_file = std::fs::File::create(compressed_path)?;
             let mut compressed_writer = std::io::BufWriter::new(compressed_file);
-            std::io::copy(&mut encoder, &mut compressed_writer)?;
+
+            match compression_type {
+                Compression::Xz => {
+                    let nar_file = std::fs::File::open(&nar_path_clone)?; // Use clone here
+                    let mut encoder = XzEncoder::new(nar_file, 9);
+                    std::io::copy(&mut encoder, &mut compressed_writer)?;
+                }
+                Compression::Zstd => {
+                    let mut nar_file = std::fs::File::open(&nar_path_clone)?; // Use clone here
+                    let mut encoder = ZstdEncoder::new(compressed_writer, 0)?; // Write to the output file
+                    std::io::copy(&mut nar_file, &mut encoder)?;
+                    encoder.finish()?; // Flush remaining compressed data
+                }
+            }
             Ok::<(), anyhow::Error>(())
         }).await??;
-        info!("Compressed NAR for '{}' on disk.", path.display());
+        info!("Compressed NAR for '{}' on disk with {:?}.", path.display(), config.loft.compression);
 
         // 3. Upload the compressed NAR from disk
         let mut attempts = 0;
@@ -295,14 +315,26 @@ pub async fn upload_nar_for_path(
         let nar_bytes = dump_nar_to_bytes(path).await?;
         info!("Created NAR for '{}' in memory.", path.display());
 
-        // 2. Compress the NAR bytes with xz in a blocking thread.
+        // 2. Compress the NAR bytes in a blocking thread.
+        let config_clone = config.clone();
         let compressed_nar_bytes = tokio::task::spawn_blocking(move || {
-            let mut encoder = XzEncoder::new(&nar_bytes[..], 9);
-            let mut compressed = Vec::new();
-            encoder.read_to_end(&mut compressed)?;
-            Ok::<_, anyhow::Error>(compressed)
+            let compressed_bytes = match config_clone.loft.compression {
+                Compression::Xz => {
+                    let mut encoder = XzEncoder::new(&nar_bytes[..], 9);
+                    let mut compressed = Vec::new();
+                    encoder.read_to_end(&mut compressed)?;
+                    compressed
+                }
+                Compression::Zstd => {
+                    let compressed = Vec::new();
+                    let mut encoder = ZstdEncoder::new(compressed, 0)?;
+                    encoder.write_all(&nar_bytes[..])?;
+                    encoder.finish()? // This returns the Vec<u8>
+                }
+            };
+            Ok::<_, anyhow::Error>(compressed_bytes)
         }).await??;
-        info!("Compressed NAR for '{}' with xz.", path.display());
+        info!("Compressed NAR for '{}' with {:?}.", path.display(), config.loft.compression);
 
         // 3. Upload the compressed NAR from memory
         let mut attempts = 0;
@@ -330,7 +362,7 @@ pub async fn upload_nar_for_path(
     }
 
     // 4. Generate and upload the .narinfo with retry logic.
-    let mut nar_info_content = get_nar_info(path).await?;
+    let mut nar_info_content = get_nar_info(path, config).await?;
 
     // Sign the path if signing is enabled.
     if let (Some(key_path), Some(_key_name)) =

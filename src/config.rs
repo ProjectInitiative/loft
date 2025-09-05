@@ -14,6 +14,14 @@ pub struct Config {
     pub loft: LoftConfig,
 }
 
+/// Compression algorithm to use.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Compression {
+    Xz,
+    Zstd,
+}
+
 /// Loft-specific configuration.
 #[derive(Deserialize, Debug, Clone)]
 pub struct LoftConfig {
@@ -41,6 +49,9 @@ pub struct LoftConfig {
     /// Optional: The threshold in MB for what is considered a large NAR.
     #[serde(default = "default_large_nar_threshold_mb")]
     pub large_nar_threshold_mb: u64,
+    /// The compression algorithm to use.
+    #[serde(default = "default_compression")]
+    pub compression: Compression,
 }
 
 /// S3-specific configuration.
@@ -61,6 +72,11 @@ fn default_upload_threads() -> usize {
 /// Sets the default NAR size threshold in MB.
 fn default_large_nar_threshold_mb() -> u64 {
     1024 // 1GB
+}
+
+/// Sets the default compression algorithm.
+fn default_compression() -> Compression {
+    Compression::Zstd
 }
 
 impl Config {
