@@ -8,7 +8,8 @@ use std::path::Path;
 use futures::stream::StreamExt;
 use serde_json::Value;
 
-use std::io::{Read, Seek, Write};
+use std::io::Read;
+use tokio::io::AsyncWriteExt;
 use tempfile::NamedTempFile;
 use std::sync::Arc;
 use std::time::Duration;
@@ -246,26 +247,34 @@ pub async fn upload_nar_for_path(
         info!("Path '{}' is large, using on-disk NAR creation.", path.display());
 
         // 1. Create a temporary file for the NAR
-        let mut nar_file = tempfile::tempfile()?;
+        let nar_temp_file = NamedTempFile::new()?;
+        let mut nar_file = tokio::fs::File::create(nar_temp_file.path()).await?;
         let mut adapter = nix_store.nar_from_path(store_path_obj);
         while let Some(chunk) = adapter.next().await {
-            nar_file.write_all(chunk?.as_slice())?;
+            nar_file.write_all(chunk?.as_slice()).await?;
         }
         info!("Created NAR for '{}' on disk.", path.display());
 
         // 2. Create a temporary file for the compressed NAR
-        let compressed_file = NamedTempFile::new()?;
-        nar_file.seek(std::io::SeekFrom::Start(0))?;
-        let mut encoder = XzEncoder::new(nar_file, 9);
-        let mut compressed_writer = std::io::BufWriter::new(&compressed_file);
-        std::io::copy(&mut encoder, &mut compressed_writer)?;
+        let compressed_temp_file = NamedTempFile::new()?;
+        let compressed_path = compressed_temp_file.path().to_path_buf();
+        let nar_path = nar_temp_file.path().to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            let nar_file = std::fs::File::open(nar_path)?;
+            let mut encoder = XzEncoder::new(nar_file, 9);
+            let compressed_file = std::fs::File::create(compressed_path)?;
+            let mut compressed_writer = std::io::BufWriter::new(compressed_file);
+            std::io::copy(&mut encoder, &mut compressed_writer)?;
+            Ok::<(), anyhow::Error>(())
+        }).await??;
         info!("Compressed NAR for '{}' on disk.", path.display());
 
         // 3. Upload the compressed NAR from disk
         let mut attempts = 0;
         loop {
             attempts += 1;
-            match uploader.upload_file(compressed_file.path(), &nar_key).await {
+            match uploader.upload_file(compressed_temp_file.path(), &nar_key).await {
                 Ok(_) => break,
                 Err(e) => {
                     if attempts >= 3 {

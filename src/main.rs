@@ -144,9 +144,9 @@ async fn main() -> Result<()> {
         local_cache.set_scan_complete()?;
     }
 
-    // // Start watching the Nix store for new paths.
-    // info!("Watching for new store paths...");
-    // nix_store_watcher::watch_store(uploader, local_cache, &config, args.force_scan).await?;
+    // Start watching the Nix store for new paths.
+    info!("Watching for new store paths...");
+    nix_store_watcher::watch_store(uploader, local_cache, &config, args.force_scan).await?;
 
     Ok(())
 }
