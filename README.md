@@ -58,6 +58,14 @@ signing_key_name = "your-cache-key-name"
 # If a path is signed by any of these keys, it will not be uploaded.
 # Example: skip_signed_by_keys = ["cache.nixos.org-1", "nix-community.cachix.org-1"]
 skip_signed_by_keys = []
+
+# Optional: Set to true to use disk for large NARs instead of memory.
+# Defaults to false.
+use_disk_for_large_nars = true
+
+# Optional: The threshold in MB for what is considered a large NAR.
+# Defaults to 1024 (1GB).
+large_nar_threshold_mb = 2048
 ```
 
 ### Development Environment (with rclone)
@@ -100,6 +108,12 @@ NIX_SIGNING_KEY_NAME="your-cache-key-name"
 # Optional: Comma-separated list of public keys whose signed paths should be skipped for upload.
 # Example: LOFT_SKIP_SIGNED_BY_KEYS="cache.nixos.org-1,nix-community.cachix.org-1"
 LOFT_SKIP_SIGNED_BY_KEYS=""
+
+# Optional: Set to true to use disk for large NARs instead of memory.
+LOFT_USE_DISK_FOR_LARGE_NARS=true
+
+# Optional: The threshold in MB for what is considered a large NAR.
+LOFT_LARGE_NAR_THRESHOLD_MB=2048
 ```
 
 ## Usage

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info, Level};
 
-use loft::{config, local_cache, nix_store_watcher, nix_utils, s3_uploader};
+use loft::{config, local_cache, nix_store_watcher, s3_uploader};
 
 use config::Config;
 use local_cache::LocalCache;

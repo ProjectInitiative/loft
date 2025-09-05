@@ -122,6 +122,12 @@ secret_key = "$AWS_SECRET_ACCESS_KEY"
 upload_threads = $LOFT_UPLOAD_THREADS
 scan_on_startup = $LOFT_SCAN_ON_STARTUP
 EOF
+              if [ -n "$LOFT_USE_DISK_FOR_LARGE_NARS" ]; then
+                echo "use_disk_for_large_nars = $LOFT_USE_DISK_FOR_LARGE_NARS" >> "$LOFT_CONFIG_DIR/loft.toml"
+              fi
+              if [ -n "$LOFT_LARGE_NAR_THRESHOLD_MB" ]; then
+                echo "large_nar_threshold_mb = $LOFT_LARGE_NAR_THRESHOLD_MB" >> "$LOFT_CONFIG_DIR/loft.toml"
+              fi
               if [ -n "$NIX_SIGNING_KEY_PATH" ]; then
                 echo "signing_key_path = \"$NIX_SIGNING_KEY_PATH\"" >> "$LOFT_CONFIG_DIR/loft.toml"
               fi

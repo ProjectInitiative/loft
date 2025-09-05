@@ -35,6 +35,12 @@ pub struct LoftConfig {
     /// Optional: List of public keys whose signed paths should be skipped for upload.
     /// If a path is signed by any of these keys, it will not be uploaded.
     pub skip_signed_by_keys: Option<Vec<String>>,
+    /// Optional: Use disk for large NARs instead of memory.
+    #[serde(default)]
+    pub use_disk_for_large_nars: bool,
+    /// Optional: The threshold in MB for what is considered a large NAR.
+    #[serde(default = "default_large_nar_threshold_mb")]
+    pub large_nar_threshold_mb: u64,
 }
 
 /// S3-specific configuration.
@@ -50,6 +56,11 @@ pub struct S3Config {
 /// Sets the default number of upload threads if not specified.
 fn default_upload_threads() -> usize {
     4
+}
+
+/// Sets the default NAR size threshold in MB.
+fn default_large_nar_threshold_mb() -> u64 {
+    1024 // 1GB
 }
 
 impl Config {

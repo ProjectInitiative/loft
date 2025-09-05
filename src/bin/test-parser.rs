@@ -1,7 +1,7 @@
 use anyhow::Result;
 use loft::nix_utils as nix;
 use std::collections::HashSet;
-use tracing::{debug, error, info, Level};
+use tracing::{error, info, Level};
 
 #[tokio::main]
 async fn main() -> Result<()> {

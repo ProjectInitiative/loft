@@ -6,10 +6,10 @@ use std::fs;
 use std::path::Path;
 
 use futures::stream::StreamExt;
-use hex::encode;
 use serde_json::Value;
-use sha2::{Digest, Sha256}; // Added this line
-use std::io::Read; // Added this line
+
+use std::io::{Read, Seek, Write};
+use tempfile::NamedTempFile;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
@@ -17,7 +17,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use xz2::read::XzEncoder; // Added this line // Added this line
 
-use attic::nix_store::{NixStore, StorePath}; // Keep NixStore
+use attic::nix_store::NixStore; // Keep NixStore
 use attic::signing::NixKeypair; // Added this line
 
 use crate::config::Config;
@@ -233,17 +233,91 @@ pub async fn upload_nar_for_path(
     config: &Config,
     nar_hash_str: &str,
 ) -> Result<()> {
-    // 1. Dump the NAR to bytes in memory.
-    let nar_bytes = dump_nar_to_bytes(path).await?;
-    info!("Created NAR for '{}' in memory.", path.display());
+    let nix_store = NixStore::connect()?;
+    let store_path_obj = nix_store.parse_store_path(path)?;
+    let path_info = nix_store.query_path_info(store_path_obj.clone()).await?;
 
-    // 2. Compress the NAR bytes with xz.
-    let mut encoder = XzEncoder::new(&nar_bytes[..], 9); // Compression level 9
-    let mut compressed_nar_bytes = Vec::new();
-    encoder.read_to_end(&mut compressed_nar_bytes)?;
-    info!("Compressed NAR for '{}' with xz.", path.display());
+    let use_disk = config.loft.use_disk_for_large_nars
+        && (path_info.nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
 
-    // 3. Generate and upload the .narinfo with retry logic.
+    let nar_key = format!("nar/{}.nar.xz", nar_hash_str);
+
+    if use_disk {
+        info!("Path '{}' is large, using on-disk NAR creation.", path.display());
+
+        // 1. Create a temporary file for the NAR
+        let mut nar_file = tempfile::tempfile()?;
+        let mut adapter = nix_store.nar_from_path(store_path_obj);
+        while let Some(chunk) = adapter.next().await {
+            nar_file.write_all(chunk?.as_slice())?;
+        }
+        info!("Created NAR for '{}' on disk.", path.display());
+
+        // 2. Create a temporary file for the compressed NAR
+        let compressed_file = NamedTempFile::new()?;
+        nar_file.seek(std::io::SeekFrom::Start(0))?;
+        let mut encoder = XzEncoder::new(nar_file, 9);
+        let mut compressed_writer = std::io::BufWriter::new(&compressed_file);
+        std::io::copy(&mut encoder, &mut compressed_writer)?;
+        info!("Compressed NAR for '{}' on disk.", path.display());
+
+        // 3. Upload the compressed NAR from disk
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match uploader.upload_file(compressed_file.path(), &nar_key).await {
+                Ok(_) => break,
+                Err(e) => {
+                    if attempts >= 3 {
+                        return Err(e);
+                    }
+                    warn!(
+                        "Failed to upload NAR for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
+                        path.display(),
+                        attempts,
+                        e
+                    );
+                    let _ = sleep(Duration::from_secs(5));
+                }
+            }
+        }
+    } else {
+        // 1. Dump the NAR to bytes in memory.
+        let nar_bytes = dump_nar_to_bytes(path).await?;
+        info!("Created NAR for '{}' in memory.", path.display());
+
+        // 2. Compress the NAR bytes with xz.
+        let mut encoder = XzEncoder::new(&nar_bytes[..], 9); // Compression level 9
+        let mut compressed_nar_bytes = Vec::new();
+        encoder.read_to_end(&mut compressed_nar_bytes)?;
+        info!("Compressed NAR for '{}' with xz.", path.display());
+
+        // 3. Upload the compressed NAR from memory
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match uploader
+                .upload_bytes(compressed_nar_bytes.clone(), &nar_key)
+                .await
+            {
+                Ok(_) => break,
+                Err(e) => {
+                    if attempts >= 3 {
+                        return Err(e);
+                    }
+                    warn!(
+                        "Failed to upload NAR for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
+                        path.display(),
+                        attempts,
+                        e
+                    );
+                    let _ = sleep(Duration::from_secs(5));
+                }
+            }
+        }
+    }
+
+    // 4. Generate and upload the .narinfo with retry logic.
     let mut nar_info_content = get_nar_info(path).await?;
 
     // Sign the path if signing is enabled.
@@ -275,45 +349,8 @@ pub async fn upload_nar_for_path(
         }
     }
 
-    // Update NAR key to include nar/ prefix and .xz suffix
-    let nar_key = format!("nar/{}.nar.xz", nar_hash_str);
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        match uploader
-            .upload_bytes(compressed_nar_bytes.clone(), &nar_key)
-            .await
-        {
-            // Use compressed_nar_bytes
-            Ok(_) => break,
-            Err(e) => {
-                if attempts >= 3 {
-                    return Err(e);
-                }
-                warn!(
-                    "Failed to upload NAR for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
-                    path.display(),
-                    attempts,
-                    e
-                );
-                let _ = sleep(Duration::from_secs(5));
-            }
-        }
-    }
-
-    // Calculate the hash of the nar_info_content for the .narinfo filename
-    let mut hasher = Sha256::new();
-    hasher.update(&nar_info_content);
-    let narinfo_content_hash = hasher.finalize();
-    let narinfo_content_hash_str = encode(narinfo_content_hash);
-
-    // Get the store path object to extract its hash for the .narinfo filename
-    let nix_store = NixStore::connect()?; // Re-connect to NixStore if not already in scope
-    let store_path_obj = nix_store.parse_store_path(path)?;
-    let store_path_hash_prefix = store_path_obj.to_hash().to_string(); // Get the hash part of the store path
-
     // The .narinfo filename should be the hash of the store path it describes
-    let narinfo_key = format!("{}.narinfo", store_path_hash_prefix);
+    let narinfo_key = format!("{}.narinfo", nar_hash_str);
     let mut attempts = 0;
     loop {
         attempts += 1;

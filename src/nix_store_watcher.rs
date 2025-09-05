@@ -6,9 +6,8 @@ use notify::{Error as NotifyError, Event, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::fs::read_dir;
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::cache_checker::CacheChecker;
 use crate::config::Config;
