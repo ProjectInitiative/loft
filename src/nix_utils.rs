@@ -247,7 +247,11 @@ pub async fn upload_nar_for_path(
     let use_disk = config.loft.use_disk_for_large_nars
         && (path_info.nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
 
-    let nar_key = format!("nar/{}.nar.xz", nar_hash_str);
+    let compression_ext = match config.loft.compression {
+        Compression::Xz => "xz",
+        Compression::Zstd => "zst",
+    };
+    let nar_key = format!("nar/{}.nar.{}", nar_hash_str, compression_ext);
 
     if use_disk {
         info!("Path '{}' is large, using on-disk NAR creation.", path.display());

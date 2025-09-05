@@ -205,7 +205,7 @@ impl S3Uploader {
 
     /// Uploads a Nix store path to S3 as both NAR and narinfo files.
     /// This handles both directories and individual files correctly.
-    pub async fn upload_store_path(&self, store_path: &StorePath) -> Result<()> {
+    pub async fn upload_store_path(&self, store_path: &StorePath, config: &crate::config::Config) -> Result<()> {
         info!("Uploading store path: {:?}", store_path);
 
         // 1. Query path info to get metadata
@@ -229,7 +229,11 @@ impl S3Uploader {
             .strip_prefix("sha256:")
             .unwrap_or_default();
 
-        let nar_key = format!("nar/{}.nar.xz", nar_hash_b32);
+        let compression_ext = match config.loft.compression {
+            crate::config::Compression::Xz => "xz",
+            crate::config::Compression::Zstd => "zst",
+        };
+        let nar_key = format!("nar/{}.nar.{}", nar_hash_b32, compression_ext);
 
         // For production, you'd want to compress the NAR with xz here
         // For now, let's upload uncompressed (you can add compression later)
