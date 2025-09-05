@@ -34,22 +34,38 @@ pub async fn scan_and_process_existing_paths(
     info!("Starting scan of existing store paths...");
     let nix_store = NixStore::connect()?;
 
-    // 1. Gather filtered closure paths
+    // 1. Gather paths that are not signed by skipped keys
     let keys_to_skip = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
     let all_sigs_map = nix::get_all_path_signatures().await?;
-    let filtered_paths = nix::filter_out_sig_keys(all_sigs_map, keys_to_skip).await?;
-    let filtered_vec: Vec<String> = filtered_paths.keys().cloned().collect();
+    let filtered_paths = nix::filter_out_sig_keys(all_sigs_map, keys_to_skip.clone()).await?;
+    let filtered_paths_vec: Vec<String> = filtered_paths.keys().cloned().collect();
 
-    let closure_paths: Vec<String> = nix::get_store_paths_closure(filtered_vec)
-        .await?
-        .into_iter()
-        .collect();
-    info!("Total unique closure paths: {}", closure_paths.len());
+    // 2. Get the closure of the filtered paths
+    let all_closure_paths: HashSet<String> =
+        match nix::get_store_paths_closure(filtered_paths_vec).await {
+            Ok(paths) => paths.into_iter().collect(),
+            Err(e) => {
+                error!("Failed to get closures: {:?}", e);
+                HashSet::new()
+            }
+        };
+    info!("Total unique closure paths: {}", all_closure_paths.len());
 
-    // 2. Check caches (local + remote)
+    // 3. Get signatures for the closure and filter again
+    let closure_signatures =
+        nix::get_path_signatures(all_closure_paths.into_iter().collect()).await?;
+    let filtered_closure_paths =
+        nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
+    let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
+    info!(
+        "Total paths after filtering closure: {}",
+        filtered_closure_vec.len()
+    );
+
+    // 4. Check caches (local + remote)
     let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
     let result = checker
-        .check_paths(&nix_store, closure_paths, force_scan)
+        .check_paths(&nix_store, filtered_closure_vec, force_scan)
         .await?;
 
     // 3. Upload missing
