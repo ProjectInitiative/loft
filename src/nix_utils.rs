@@ -250,22 +250,29 @@ pub async fn upload_nar_for_path(
     if let (Some(key_path), Some(_key_name)) =
         (&config.loft.signing_key_path, &config.loft.signing_key_name)
     {
-        info!(
-            "Signing path '{}' with key from file '{}'.",
-            path.display(),
-            key_path.display()
-        );
-        let key_file_content = fs::read_to_string(key_path)?;
-        debug!(
-            "Read key file from '{}', content length: {}",
-            key_path.display(),
-            key_file_content.len()
-        );
-        let nix_keypair = NixKeypair::from_str(&key_file_content)?;
+        if !key_path.exists() {
+            warn!(
+                "Signing key file '{}' not found. Skipping signing.",
+                key_path.display()
+            );
+        } else {
+            info!(
+                "Signing path '{}' with key from file '{}'.",
+                path.display(),
+                key_path.display()
+            );
+            let key_file_content = fs::read_to_string(key_path)?;
+            debug!(
+                "Read key file from '{}', content length: {}",
+                key_path.display(),
+                key_file_content.len()
+            );
+            let nix_keypair = NixKeypair::from_str(&key_file_content)?;
 
-        let mut nar_info = nix_manifest::from_str::<NarInfo>(&nar_info_content)?;
-        nar_info.sign(&nix_keypair);
-        nar_info_content = nix_manifest::to_string(&nar_info)?;
+            let mut nar_info = nix_manifest::from_str::<NarInfo>(&nar_info_content)?;
+            nar_info.sign(&nix_keypair);
+            nar_info_content = nix_manifest::to_string(&nar_info)?;
+        }
     }
 
     // Update NAR key to include nar/ prefix and .xz suffix
