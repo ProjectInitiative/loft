@@ -6,14 +6,9 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, Level, debug, error};
+use tracing::{debug, error, info, Level};
 
-mod config;
-mod nix_store_watcher;
-mod nix_utils;
-mod s3_uploader;
-mod nix_manifest;
-mod local_cache;
+use loft::{config, local_cache, nix_store_watcher, nix_utils, s3_uploader};
 
 use config::Config;
 use local_cache::LocalCache;
@@ -84,18 +79,14 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    
-
     // Load the application configuration.
     let config = Config::from_file(&args.config)?;
     info!("Configuration loaded successfully.");
 
     // Initialize the S3 uploader.
-    let uploader: Arc<s3_uploader::S3Uploader> = Arc::new(s3_uploader::S3Uploader::new(&config.s3).await?);
-    info!(
-        "S3 uploader initialized for bucket '{}'.",
-        config.s3.bucket
-    );
+    let uploader: Arc<s3_uploader::S3Uploader> =
+        Arc::new(s3_uploader::S3Uploader::new(&config.s3).await?);
+    info!("S3 uploader initialized for bucket '{}'.", config.s3.bucket);
 
     // Upload nix-cache-info file.
     uploader.upload_nix_cache_info().await?;
@@ -130,8 +121,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    
-
     if config.loft.populate_cache_on_startup && !local_cache.is_scan_complete()? {
         info!("Populating local cache from S3 on startup...");
         populate_local_cache_from_s3(uploader.clone(), local_cache.clone()).await?;
@@ -139,10 +128,7 @@ async fn main() -> Result<()> {
     }
 
     info!("scan on startup: {}", config.loft.scan_on_startup);
-    info!(
-        "scan already complete: {}",
-        local_cache.is_scan_complete()?
-    );
+    info!("scan already complete: {}", local_cache.is_scan_complete()?);
     if config.loft.scan_on_startup && !local_cache.is_scan_complete()? {
         // Scan existing paths and upload them.
         info!("Scanning existing store paths...");
@@ -158,9 +144,9 @@ async fn main() -> Result<()> {
         local_cache.set_scan_complete()?;
     }
 
-    // Start watching the Nix store for new paths.
-    info!("Watching for new store paths...");
-    nix_store_watcher::watch_store(uploader, local_cache, &config, args.force_scan).await?;
+    // // Start watching the Nix store for new paths.
+    // info!("Watching for new store paths...");
+    // nix_store_watcher::watch_store(uploader, local_cache, &config, args.force_scan).await?;
 
     Ok(())
 }
@@ -180,7 +166,11 @@ async fn populate_local_cache_from_s3(
             hashes.push(hash.to_string());
         }
     }
-    debug!("Adding {} hashes to local cache: {:?}", hashes.len(), hashes);
+    debug!(
+        "Adding {} hashes to local cache: {:?}",
+        hashes.len(),
+        hashes
+    );
 
     local_cache.add_many_path_hashes(&hashes)?;
     local_cache.set_scan_complete()?;

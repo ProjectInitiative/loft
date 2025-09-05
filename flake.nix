@@ -39,6 +39,7 @@
             inputsFrom = [ attic-flake.devShells.${system}.default ];
             # Additional development tools
             packages = with pkgs; [
+              rust-analyzer
               # For interacting with Garage S3
               awscli2
               # For interacting with the Nix store
