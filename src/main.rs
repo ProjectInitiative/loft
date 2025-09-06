@@ -2,17 +2,18 @@
 //!
 //! A lightweight, client-only Nix binary cache uploader for S3-compatible storage.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
-use loft::{config, local_cache, nix_store_watcher, s3_uploader};
+use loft::{config, local_cache, nix_store_watcher, s3_uploader, pruner};
 
 use config::Config;
 use local_cache::LocalCache;
 use nix_store_watcher::process_path; // Import process_path
+use pruner::Pruner;
 
 /// Command-line arguments for Loft.
 #[derive(Parser, Debug)]
@@ -45,6 +46,10 @@ struct Args {
     /// Manually upload a specific Nix store path. Can be specified multiple times.
     #[arg(long, value_name = "PATH")]
     upload_path: Option<Vec<PathBuf>>,
+
+    /// Manually trigger pruning of old objects.
+    #[arg(long)]
+    prune: bool,
 }
 
 #[tokio::main]
@@ -128,6 +133,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Handle manual pruning
+    if args.prune {
+        info!("Manually triggering pruning...");
+        let pruner = Pruner::new(uploader.clone(), Arc::new(config.clone()));
+        pruner.prune_old_objects().await?;
+        info!("Manual pruning complete.");
+        return Ok(()); // Exit after manual pruning
+    }
+
     if config.loft.populate_cache_on_startup && !local_cache.is_scan_complete()? {
         info!("Populating local cache from S3 on startup...");
         populate_local_cache_from_s3(uploader.clone(), local_cache.clone()).await?;
@@ -153,9 +167,50 @@ async fn main() -> Result<()> {
 
     // Start watching the Nix store for new paths.
     info!("Watching for new store paths...");
-    nix_store_watcher::watch_store(uploader, local_cache, &config, args.force_scan).await?;
+    nix_store_watcher::watch_store(uploader.clone(), local_cache.clone(), &config, args.force_scan).await?;
+
+    // Start pruning task if enabled
+    if config.loft.prune_enabled {
+        if let Some(schedule_str) = config.loft.prune_schedule.clone() {
+            match parse_duration_string(&schedule_str) {
+                Ok(duration) => {
+                    info!("Starting pruning task with schedule: {:?}", duration);
+                    let pruner = Pruner::new(uploader.clone(), Arc::new(config.clone()));
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(duration).await;
+                            info!("Running scheduled pruning job...");
+                            if let Err(e) = pruner.prune_old_objects().await {
+                                error!("Error running scheduled pruning job: {:?}", e);
+                            }
+                        }
+                    });
+                },
+                Err(e) => {
+                    error!("Invalid prune_schedule in config: {:?}", e);
+                }
+            }
+        } else {
+            warn!("Pruning is enabled but prune_schedule is not set in config.");
+        }
+    }
 
     Ok(())
+}
+
+/// Parses a duration string (e.g., "1h", "24h", "7d") into a tokio::time::Duration.
+fn parse_duration_string(s: &str) -> Result<tokio::time::Duration> {
+    let s = s.trim();
+    let (num_str, unit_str) = s.split_at(s.len() - 1);
+    let num: u64 = num_str.parse().context("Invalid duration number")?;
+
+    match unit_str {
+        "h" => Ok(tokio::time::Duration::from_secs(num * 3600)),
+        "d" => Ok(tokio::time::Duration::from_secs(num * 3600 * 24)),
+        "m" => Ok(tokio::time::Duration::from_secs(num * 60)),
+        "s" => Ok(tokio::time::Duration::from_secs(num)),
+        _ => Err(anyhow::anyhow!("Invalid duration unit: {}", unit_str)),
+    }
 }
 
 async fn populate_local_cache_from_s3(

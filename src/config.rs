@@ -52,6 +52,19 @@ pub struct LoftConfig {
     /// The compression algorithm to use.
     #[serde(default = "default_compression")]
     pub compression: Compression,
+    /// Optional: Enable pruning of old objects from the S3 cache.
+    #[serde(default)]
+    pub prune_enabled: bool,
+    /// Optional: Retention period for pruning in days. Objects older than this will be deleted.
+    #[serde(default = "default_prune_retention_days")]
+    pub prune_retention_days: u64,
+    /// Optional: Maximum desired size of the S3 bucket in GB. If exceeded, oldest objects are pruned.
+    pub prune_max_size_gb: Option<u64>,
+    /// Optional: Target percentage to prune down to when prune_max_size_gb is exceeded (e.g., 80).
+    /// Only applicable if prune_max_size_gb is set.
+    pub prune_target_percentage: Option<u8>,
+    /// Optional: Schedule for running the pruning job (e.g., "24h", "1d").
+    pub prune_schedule: Option<String>,
 }
 
 /// S3-specific configuration.
@@ -77,6 +90,11 @@ fn default_large_nar_threshold_mb() -> u64 {
 /// Sets the default compression algorithm.
 fn default_compression() -> Compression {
     Compression::Zstd
+}
+
+/// Sets the default retention days for pruning.
+fn default_prune_retention_days() -> u64 {
+    30 // Default to 30 days retention
 }
 
 impl Config {

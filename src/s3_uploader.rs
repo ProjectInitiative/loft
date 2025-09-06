@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use aws_sdk_s3::types::CompletedPart;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use chrono::{DateTime, Utc};
 
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
@@ -485,5 +486,76 @@ impl S3Uploader {
         self.upload_bytes(content.into_bytes(), key).await?;
         info!("Successfully uploaded 'nix-cache-info' to '{}'.", key);
         Ok(())
+    }
+
+    /// Lists objects in the S3 bucket.
+    pub async fn list_objects(&self, continuation_token: Option<String>) -> Result<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output> {
+        let mut request = self.client.list_objects_v2().bucket(&self.bucket);
+
+        if let Some(token) = continuation_token {
+            request = request.continuation_token(token);
+        }
+
+        let output = request.send().await?;
+        Ok(output)
+    }
+
+    /// Deletes an object from the S3 bucket.
+    pub async fn delete_object(&self, key: &str) -> Result<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await?;
+        debug!("Successfully deleted object: {}", key);
+        Ok(())
+    }
+
+    /// Gets the total size of all objects in the S3 bucket in bytes.
+    /// This can be an expensive operation for large buckets.
+    pub async fn get_bucket_size(&self) -> Result<u64> {
+        info!("Calculating current bucket size...");
+        let mut total_size: u64 = 0;
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let output = self.list_objects(continuation_token.clone()).await?;
+
+            if let Some(contents) = output.contents {
+                for object in contents {
+                    if let Some(size) = object.size {
+                        total_size += size as u64;
+                    }
+                }
+            }
+
+            continuation_token = output.next_continuation_token;
+
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+        info!("Current bucket size: {} bytes", total_size);
+        Ok(total_size)
+    }
+}
+
+
+
+// Helper trait to convert aws_sdk_s3::types::DateTime to chrono::DateTime<Utc>
+pub trait AwsDateTimeExt {
+    fn to_chrono_utc(&self) -> DateTime<Utc>;
+}
+
+impl AwsDateTimeExt for aws_sdk_s3::primitives::DateTime {
+    fn to_chrono_utc(&self) -> DateTime<Utc> {
+        let secs = self.secs();
+        let nanos = self.as_nanos();
+
+        DateTime::<Utc>::from_timestamp(secs, nanos as u32).unwrap_or_else(|| {
+            warn!("Invalid timestamp from S3, falling back to Utc::now()");
+            Utc::now()
+        })
     }
 }
