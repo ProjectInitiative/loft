@@ -31,7 +31,7 @@
       in
       {
         # Expose the NixOS module
-        nixosModules.default = import ./nixos;
+        nixosModules.loft = import ./nixos;
 
         # Expose the overlay to make the package easily available
         overlays.default = final: prev: {
