@@ -182,6 +182,10 @@ in
       })
     ];
 
+     systemd.tmpfiles.rules = [
+      "d ${builtins.dirOf cfg.localCachePath} 0750 root root -"
+    ];
+
     systemd.services.loft = {
       description = "Loft S3 Binary Cache Uploader";
       wantedBy = [ "multi-user.target" ];
