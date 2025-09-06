@@ -1,37 +1,40 @@
 # nixos/module.nix
 { config, lib, pkgs, ... }:
 
+with lib;
+
 let
   cfg = config.services.loft;
-  loft-pkg = config.services.loft.package;
+  loft-pkg = cfg.package;
 
   # Use Nixpkgs' toml format for clean generation
   tomlFormat = pkgs.formats.toml { };
 
-  # Define the base configuration from the explicit options
+  # Define the base configuration from the explicit options.
+  # Secrets are handled separately by the systemd service.
   baseConfig = {
     s3 = {
       inherit (cfg.s3) bucket region endpoint;
-      access_key = cfg.s3.accessKeyFile;
-      secret_key = cfg.s3.secretKeyFile;
     };
     loft = {
-      inherit (cfg)
-        upload_threads
-        scan_on_startup
-        populate_cache_on_startup
-        use_disk_for_large_nars
-        large_nar_threshold_mb
-        compression
-        prune_enabled
-        prune_retention_days
-        prune_max_size_gb
-        prune_target_percentage
-        prune_schedule;
+      upload_threads = cfg.uploadThreads;
+      scan_on_startup = cfg.scanOnStartup;
+      populate_cache_on_startup = cfg.populateCacheOnStartup;
+      use_disk_for_large_nars = cfg.useDiskForLargeNars;
+      large_nar_threshold_mb = cfg.largeNarThresholdMb;
+      compression = cfg.compression;
+
+      # Pruning options
+      prune_enabled = cfg.pruning.enable;
+      prune_retention_days = cfg.pruning.retentionDays;
+      prune_max_size_gb = cfg.pruning.maxSizeGb;
+      prune_target_percentage = cfg.pruning.targetPercentage;
+      prune_schedule = cfg.pruning.schedule;
+
+      # Other options
       signing_key_path = cfg.signingKeyFile;
       signing_key_name = cfg.signingKeyName;
       skip_signed_by_keys = cfg.skipSignedByKeys;
-      local_cache_db_path = cfg.localCacheDBPath;
     };
   };
 
@@ -41,150 +44,123 @@ let
   # Generate the final loft.toml content
   loftToml = tomlFormat.generate "loft.toml" finalConfig;
 
-  # Determine if AWS credentials are required for the puller
-  privatePuller = cfg.puller.enable && cfg.puller.private;
-  pullerS3Url = "s3://${cfg.s3.bucket}?endpoint=${cfg.s3.endpoint}&region=${cfg.s3.region}";
-
 in
 {
   ###### OPTIONS ######
   options.services.loft = {
-    enable = lib.mkEnableOption "Loft: a client-only Nix binary cache uploader for S3";
+    enable = mkEnableOption "the Loft pusher service on this system.";
 
-    package = lib.mkOption {
-      type = lib.types.package;
+    package = mkOption {
+      type = types.package;
       default = pkgs.loft;
+      defaultText = literalExpression "pkgs.loft";
       description = "The loft package to use.";
     };
 
-    
-    localCacheDBPath = lib.mkOption {
-      type = lib.types.path;
+    s3 = {
+      bucket = mkOption { type = types.str; description = "S3 bucket name for the cache."; };
+      region = mkOption { type = types.str; default = "us-east-1"; description = "S3 region for the cache."; };
+      endpoint = mkOption { type = types.str; description = "S3 endpoint URL for the cache."; };
+      accessKeyFile = mkOption { type = types.path; description = "Path to a file containing the S3 access key."; };
+      secretKeyFile = mkOption { type = types.path; description = "Path to a file containing the S3 secret key."; };
+    };
+
+    localCachePath = mkOption {
+      type = types.path;
       default = "/var/lib/loft/cache.db";
-      description = "Path to the local cache database file.";
+      description = "Path to the local cache database file for the pusher service.";
     };
 
-    puller = {
-      enable = lib.mkEnableOption "this system as a cache puller.";
-      private = lib.mkBoolOpt false "Whether to use private S3 access for pulling.";
-      trustedPublicKeys = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [ ];
-        example = [ "my-cache.example.com-1:abcdef..." ];
-        description = "The public key(s) for the binary cache.";
-      };
-    };
-
-    upload_threads = lib.mkOption {
-      type = lib.types.int;
-      default = 4;
-      description = "The number of concurrent uploads to perform.";
-    };
-
-    scan_on_startup = lib.mkBoolOpt false "Whether to perform an initial scan of the store on startup.";
-    populate_cache_on_startup = lib.mkBoolOpt false "Populate local cache from S3 on startup if the cache is empty.";
-
-    signingKeyFile = lib.mkOption {
-      type = with lib.types; nullOr path;
+    signingKeyFile = mkOption {
+      type = with types; nullOr path;
       default = null;
       description = "Absolute path to the Nix signing key file.";
     };
 
-    signingKeyName = lib.mkOption {
-      type = with lib.types; nullOr str;
+    signingKeyName = mkOption {
+      type = with types; nullOr str;
       default = null;
       description = "Name of your Nix signing key (e.g., 'cache.example.org-1').";
     };
 
-    skipSignedByKeys = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ ];
-      example = [ "cache.nixos.org-1" ];
+    uploadThreads = mkOption {
+      type = types.int;
+      default = 4;
+      description = "The number of concurrent uploads to perform.";
+    };
+    scanOnStartup = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Whether to perform an initial scan of the store on startup.";
+    };
+    populateCacheOnStartup = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Whether to populate the local cache from S3 on startup if the cache is empty.";
+    };
+    skipSignedByKeys = mkOption {
+      type = types.listOf types.str;
+      default = [];
       description = "List of public keys whose signed paths should be skipped for upload.";
     };
-
-    use_disk_for_large_nars = lib.mkBoolOpt false "Use disk for large NARs instead of memory.";
-    large_nar_threshold_mb = lib.mkOption {
-      type = lib.types.int;
+    useDiskForLargeNars = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Use disk for large NARs instead of memory.";
+    };
+    largeNarThresholdMb = mkOption {
+      type = types.int;
       default = 1024;
       description = "The threshold in MB for what is considered a large NAR.";
     };
-
-    compression = lib.mkOption {
-      type = lib.types.enum [ "xz" "zstd" ];
+    compression = mkOption {
+      type = types.enum [ "xz" "zstd" ];
       default = "zstd";
       description = "The compression algorithm to use.";
     };
-
-    prune_enabled = lib.mkBoolOpt false "Enable pruning of old objects from the S3 cache.";
-    prune_retention_days = lib.mkOption {
-      type = lib.types.int;
-      default = 30;
-      description = "Retention period for pruning in days.";
-    };
-    prune_max_size_gb = lib.mkOption {
-      type = with lib.types; nullOr int;
-      default = null;
-      description = "Maximum desired size of the S3 bucket in GB.";
-    };
-    prune_target_percentage = lib.mkOption {
-      type = with lib.types; nullOr (lib.types.ints.between 1 99);
-      default = null;
-      description = "Target percentage to prune down to when prune_max_size_gb is exceeded.";
-    };
-    prune_schedule = lib.mkOption {
-      type = with lib.types; nullOr str;
-      default = null;
-      example = "24h";
-      description = "Schedule for running the pruning job (e.g., '24h', '1d').";
-    };
-
-    s3 = {
-      bucket = lib.mkOption { type = lib.types.str; };
-      region = lib.mkOption { type = lib.types.str; default = "us-east-1"; };
-      endpoint = lib.mkOption { type = lib.types.str; };
-      accessKeyFile = lib.mkOption { type = lib.types.path; };
-      secretKeyFile = lib.mkOption { type = lib.types.path; };
+    pruning = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Enable pruning of old objects from the S3 cache.";
+      };
+      retentionDays = mkOption {
+        type = types.int;
+        default = 30;
+        description = "Retention period for pruning in days. Objects older than this will be deleted.";
+      };
+      maxSizeGb = mkOption {
+        type = with types; nullOr int;
+        default = null;
+        description = "Maximum desired size of the S3 bucket in GB. If exceeded, oldest objects are pruned.";
+      };
+      targetPercentage = mkOption {
+        type = with types; nullOr (types.ints.between 1 99);
+        default = null;
+        description = "Target percentage to prune down to when maxSizeGb is exceeded (e.g., 80).";
+      };
+      schedule = mkOption {
+        type = with types; nullOr str;
+        default = null;
+        description = "Schedule for running the pruning job (e.g., '24h', '1d').";
+      };
     };
 
-    extraConfig = lib.mkOption {
-      type = lib.types.attrs; # `attrs` is an alias for `attrsOf anything`
+    extraConfig = mkOption {
+      type = types.attrs;
       default = { };
-      description = ''
-        Extra configuration options to be merged into the loft.toml file.
-        This allows you to set new configuration options without needing to
-        update the NixOS module.
-      '';
+      description = "Extra configuration to be merged into loft.toml.";
     };
   };
 
-
   ###### CONFIGURATION ######
-  config = lib.mkIf cfg.enable {
-    # Automatically apply the overlay from the loft flake
-    nix.settings = lib.mkMerge [
-      (lib.mkIf cfg.puller.enable {
-        substituters = [ pullerS3Url ];
-        trusted-public-keys = cfg.puller.trustedPublicKeys;
-      })
-      (lib.mkIf privatePuller {
-        extra-access-tokens =
-          let
-            awsCredsScript = pkgs.writeShellScript "aws-creds-for-nix" ''
-              #!${pkgs.runtimeShell}
-              set -eu
-              echo "AWS_ACCESS_KEY_ID=$(<${cfg.s3.accessKeyFile})"
-              echo "AWS_SECRET_ACCESS_KEY=$(<${cfg.s3.secretKeyFile})"
-            '';
-          in
-          [ "s3://${cfg.s3.bucket} ${awsCredsScript}" ];
-      })
-    ];
-
+  config = mkIf cfg.enable {
+    # Create the state directory for the cache database
     systemd.tmpfiles.rules = [
       "d ${builtins.dirOf cfg.localCachePath} 0750 root root -"
     ];
 
+    # Configure the systemd service for the pusher
     systemd.services.loft = {
       description = "Loft S3 Binary Cache Uploader";
       wantedBy = [ "multi-user.target" ];
@@ -193,13 +169,25 @@ in
 
       serviceConfig = {
         Type = "simple";
-        ExecStart = ''
-          ${loft-pkg}/bin/loft --config ${loftToml}
-        '';
+        ExecStart =
+          let
+            # A wrapper script to securely load S3 credentials into environment variables
+            wrapper = pkgs.writeShellScript "loft-wrapper" ''
+              #!${pkgs.runtimeShell}
+              set -eu
+              export AWS_ACCESS_KEY_ID=$(cat ${cfg.s3.accessKeyFile})
+              export AWS_SECRET_ACCESS_KEY=$(cat ${cfg.s3.secretKeyFile})
+              exec ${loft-pkg}/bin/loft --config ${loftToml}
+            '';
+          in
+          "${wrapper}";
+
         Restart = "on-failure";
         RestartSec = "10s";
-        User = "root";
+        User = "root"; # Required to read /nix/store
         Group = "root";
+
+        # Hardening options
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
         DevicePolicy = "closed";
         LockPersonality = true;
