@@ -4,11 +4,12 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use loft::{config, local_cache, nix_store_watcher, s3_uploader, pruner};
+use loft::{config, local_cache, nix_store_watcher, pruner, s3_uploader};
 
 use config::Config;
 use local_cache::LocalCache;
@@ -73,13 +74,29 @@ async fn main() -> Result<()> {
 
     tracing::subscriber::set_global_default(subscriber)?;
 
+    // Load the application configuration.
+    let config = Config::from_file(&args.config)?;
+    info!("Configuration loaded successfully.");
+
+    // Ensure the parent directory for the local cache exists.
+    if let Some(parent_dir) = config.loft.local_cache_path.parent() {
+        fs::create_dir_all(parent_dir).with_context(|| {
+            format!(
+                "Failed to create parent directory for local cache at '{}'",
+                parent_dir.display()
+            )
+        })?;
+    }
     // Initialize the local cache.
-    let local_cache = Arc::new(LocalCache::new(&PathBuf::from(".loft_cache.db"))?);
+    let local_cache = Arc::new(LocalCache::new(&config.loft.local_cache_path)?);
     local_cache.initialize()?;
 
     if args.clear_cache {
-        info!("Clearing local cache...");
-        std::fs::remove_file(".loft_cache.db")?;
+        info!(
+            "Clearing local cache at {}...",
+            config.loft.local_cache_path.display()
+        );
+        std::fs::remove_file(&config.loft.local_cache_path)?; // Modify this line
         info!("Local cache cleared.");
         return Ok(());
     }
@@ -90,10 +107,6 @@ async fn main() -> Result<()> {
         info!("Initial scan flag reset.");
         return Ok(());
     }
-
-    // Load the application configuration.
-    let config = Config::from_file(&args.config)?;
-    info!("Configuration loaded successfully.");
 
     // Initialize the S3 uploader.
     let uploader: Arc<s3_uploader::S3Uploader> =
@@ -167,7 +180,13 @@ async fn main() -> Result<()> {
 
     // Start watching the Nix store for new paths.
     info!("Watching for new store paths...");
-    nix_store_watcher::watch_store(uploader.clone(), local_cache.clone(), &config, args.force_scan).await?;
+    nix_store_watcher::watch_store(
+        uploader.clone(),
+        local_cache.clone(),
+        &config,
+        args.force_scan,
+    )
+    .await?;
 
     // Start pruning task if enabled
     if config.loft.prune_enabled {
@@ -185,7 +204,7 @@ async fn main() -> Result<()> {
                             }
                         }
                     });
-                },
+                }
                 Err(e) => {
                     error!("Invalid prune_schedule in config: {:?}", e);
                 }

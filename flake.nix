@@ -30,6 +30,14 @@
         };
       in
       {
+        # Expose the NixOS module
+        nixosModules.default = import ./nixos;
+
+        # Expose the overlay to make the package easily available
+        overlays.default = final: prev: {
+          loft = self.packages.${prev.system}.default;
+        };
+
         packages = {
           default = loft;
         };

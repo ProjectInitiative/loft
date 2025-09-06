@@ -3,12 +3,12 @@
 let
   # Get the Nix libraries that attic needs without the cargo vendoring conflicts
   nixLibs = with pkgs; [
-    nix
+    nix    
+    awscli2
     nlohmann_json
     boost
     brotli
     libsodium
-    sqlite
     pkg-config
   ];
 in

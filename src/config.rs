@@ -22,9 +22,16 @@ pub enum Compression {
     Zstd,
 }
 
+fn default_local_cache_path() -> PathBuf {
+    PathBuf::from("/var/lib/loft/cache.db")
+}
+
 /// Loft-specific configuration.
 #[derive(Deserialize, Debug, Clone)]
 pub struct LoftConfig {
+    /// The path to the local cache database file.
+    #[serde(default = "default_local_cache_path")]
+    pub local_cache_path: PathBuf,
     /// The number of concurrent uploads to perform.
     #[serde(default = "default_upload_threads")]
     pub upload_threads: usize,
@@ -102,9 +109,8 @@ impl Config {
     pub fn from_file(path: &Path) -> Result<Self> {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("Failed to read configuration file at {:?}", path))?;
-        let config: Config = toml::from_str(&contents)
-            .with_context(|| "Failed to parse TOML configuration")?;
+        let config: Config =
+            toml::from_str(&contents).with_context(|| "Failed to parse TOML configuration")?;
         Ok(config)
     }
 }
-
