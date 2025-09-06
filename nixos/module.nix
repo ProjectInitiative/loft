@@ -182,7 +182,7 @@ in
       })
     ];
 
-     systemd.tmpfiles.rules = [
+    systemd.tmpfiles.rules = [
       "d ${builtins.dirOf cfg.localCachePath} 0750 root root -"
     ];
 
