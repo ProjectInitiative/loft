@@ -53,6 +53,7 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
+      default = pkgs.loft;
       description = "The loft package to use.";
     };
 
@@ -74,7 +75,6 @@ in
       };
     };
 
-    # ... (all the previous options like upload_threads, scan_on_startup, etc. remain the same)
     upload_threads = lib.mkOption {
       type = lib.types.int;
       default = 4;
@@ -147,7 +147,6 @@ in
       secretKeyFile = lib.mkOption { type = lib.types.path; };
     };
 
-    # --- NEW OPTION ---
     extraConfig = lib.mkOption {
       type = lib.types.attrs; # `attrs` is an alias for `attrsOf anything`
       default = { };
@@ -162,7 +161,7 @@ in
 
   ###### CONFIGURATION ######
   config = lib.mkIf cfg.enable {
-    # ... (the rest of the file remains the same)
+    # Automatically apply the overlay from the loft flake
     nix.settings = lib.mkMerge [
       (lib.mkIf cfg.puller.enable {
         substituters = [ pullerS3Url ];
