@@ -15,10 +15,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::sleep;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use xz2::read::XzEncoder;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
+use attic::hash::Hash;
 use attic::nix_store::NixStore; // Keep NixStore
 use attic::signing::NixKeypair; // Added this line
 
@@ -171,52 +172,7 @@ pub async fn get_store_paths_closure(store_paths: Vec<String>) -> Result<Vec<Str
         .collect())
 }
 
-/// Gets the .narinfo for a store path.
-pub async fn get_nar_info(store_path: &Path, config: &Config) -> Result<String> {
-    let nix_store = NixStore::connect()?;
-    let store_path_obj = nix_store.parse_store_path(store_path)?;
 
-    let path_info = nix_store.query_path_info(store_path_obj).await?;
-
-    let mut nar_info_content = String::new();
-    nar_info_content.push_str(&format!(
-        "StorePath: {}\n",
-        path_info.path.as_os_str().to_string_lossy().to_string()
-    ));
-    // Update URL to reflect xz compression and nar/ subdirectory
-    let compression_str = match config.loft.compression {
-        Compression::Xz => "xz",
-        Compression::Zstd => "zstd",
-    };
-    nar_info_content.push_str(&format!(
-        "URL: nar/{}.nar.{}\n",
-        path_info.nar_hash.to_typed_base32(),
-        compression_str
-    ));
-    nar_info_content.push_str(&format!("Compression: {}\n", compression_str));
-    nar_info_content.push_str(&format!(
-        "NarHash: {}\n",
-        path_info.nar_hash.to_typed_base32()
-    ));
-    nar_info_content.push_str(&format!("NarSize: {}\n", path_info.nar_size));
-    nar_info_content.push_str(&format!(
-        "References: {}\n",
-        path_info
-            .references
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
-    ));
-    if !path_info.sigs.is_empty() {
-        nar_info_content.push_str(&format!("Sig: {}\n", path_info.sigs.join(" ")));
-    }
-    if let Some(ca) = path_info.ca {
-        nar_info_content.push_str(&format!("CA: {}\n", ca));
-    }
-
-    Ok(nar_info_content)
-}
 
 /// Gets the .narinfo key for a store path.
 pub fn get_narinfo_key(store_path: &attic::nix_store::StorePath) -> String {
@@ -248,24 +204,17 @@ pub async fn upload_nar_for_path(
     let store_path_obj = nix_store.parse_store_path(path)?;
     let path_info = nix_store.query_path_info(store_path_obj.clone()).await?;
 
-    let nar_hash_b32_full = path_info.nar_hash.to_typed_base32();
-    let nar_hash_str = nar_hash_b32_full
-        .strip_prefix("sha256:")
-        .unwrap_or_default();
-
     let use_disk = config.loft.use_disk_for_large_nars
         && (path_info.nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
 
     let compression_ext = match config.loft.compression {
         Compression::Xz => "xz",
-        Compression::Zstd => "zst",
+        Compression::Zstd => "zstd",
     };
-    let nar_key = format!("nar/{}.nar.{}", nar_hash_str, compression_ext);
 
-    if use_disk {
+    let (compressed_nar_bytes, nar_key) = if use_disk {
         info!("Path '{}' is large, using on-disk NAR creation.", path.display());
 
-        // 1. Create a temporary file for the NAR
         let nar_temp_file = NamedTempFile::new()?;
         let mut nar_file = tokio::fs::File::create(nar_temp_file.path()).await?;
         let mut adapter = nix_store.nar_from_path(store_path_obj.clone());
@@ -274,147 +223,139 @@ pub async fn upload_nar_for_path(
         }
         info!("Created NAR for '{}' on disk.", path.display());
 
-        // 2. Create a temporary file for the compressed NAR
         let compressed_temp_file = NamedTempFile::new()?;
         let compressed_path = compressed_temp_file.path().to_path_buf();
         let nar_path = nar_temp_file.path().to_path_buf();
-        let compression_type = config.loft.compression; // Capture compression type
+        let compression_type = config.loft.compression;
 
-        let nar_path_clone = nar_path.clone(); // Clone here
         tokio::task::spawn_blocking(move || {
-            
             let compressed_file = std::fs::File::create(compressed_path)?;
             let mut compressed_writer = std::io::BufWriter::new(compressed_file);
 
             match compression_type {
                 Compression::Xz => {
-                    let nar_file = std::fs::File::open(&nar_path_clone)?; // Use clone here
+                    let nar_file = std::fs::File::open(&nar_path)?;
                     let mut encoder = XzEncoder::new(nar_file, 9);
                     std::io::copy(&mut encoder, &mut compressed_writer)?;
                 }
                 Compression::Zstd => {
-                    let mut nar_file = std::fs::File::open(&nar_path_clone)?; // Use clone here
-                    let mut encoder = ZstdEncoder::new(compressed_writer, 0)?; // Write to the output file
+                    let mut nar_file = std::fs::File::open(&nar_path)?;
+                    let mut encoder = ZstdEncoder::new(compressed_writer, 0)?;
                     std::io::copy(&mut nar_file, &mut encoder)?;
-                    encoder.finish()?; // Flush remaining compressed data
+                    encoder.finish()?;
                 }
             }
             Ok::<(), anyhow::Error>(())
         }).await??;
         info!("Compressed NAR for '{}' on disk with {:?}.", path.display(), config.loft.compression);
 
-        // 3. Upload the compressed NAR from disk
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            match uploader.upload_file(compressed_temp_file.path(), &nar_key).await {
-                Ok(_) => break,
-                Err(e) => {
-                    if attempts >= 3 {
-                        return Err(e);
-                    }
-                    warn!(
-                        "Failed to upload NAR for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
-                        path.display(),
-                        attempts,
-                        e
-                    );
-                    let _ = sleep(Duration::from_secs(5));
-                }
-            }
-        }
+        let compressed_bytes = tokio::fs::read(compressed_temp_file.path()).await?;
+        let file_hash = Hash::sha256_from_bytes(&compressed_bytes);
+        let nar_key = format!("nar/{}.nar.{}", file_hash.to_typed_base32().strip_prefix("sha256:").unwrap(), compression_ext);
+
+        (compressed_bytes, nar_key)
     } else {
-        // 1. Dump the NAR to bytes in memory.
         let nar_bytes = dump_nar_to_bytes(path).await?;
         info!("Created NAR for '{}' in memory.", path.display());
 
-        // 2. Compress the NAR bytes in a blocking thread.
         let config_clone = config.clone();
-        let compressed_nar_bytes = tokio::task::spawn_blocking(move || {
+        let compressed_nar_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
             let compressed_bytes = match config_clone.loft.compression {
                 Compression::Xz => {
                     let mut encoder = XzEncoder::new(&nar_bytes[..], 9);
                     let mut compressed = Vec::new();
                     encoder.read_to_end(&mut compressed)?;
-                    compressed
+                    Ok(compressed)
                 }
                 Compression::Zstd => {
                     let compressed = Vec::new();
                     let mut encoder = ZstdEncoder::new(compressed, 0)?;
                     encoder.write_all(&nar_bytes[..])?;
-                    encoder.finish()? // This returns the Vec<u8>
+                    encoder.finish()
                 }
-            };
-            Ok::<_, anyhow::Error>(compressed_bytes)
+            }?;
+            Ok(compressed_bytes)
         }).await??;
         info!("Compressed NAR for '{}' with {:?}.", path.display(), config.loft.compression);
 
-        // 3. Upload the compressed NAR from memory
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            match uploader
-                .upload_bytes(compressed_nar_bytes.clone(), &nar_key)
-                .await
-            {
-                Ok(_) => break,
-                Err(e) => {
-                    if attempts >= 3 {
-                        return Err(e);
-                    }
-                    warn!(
-                        "Failed to upload NAR for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
-                        path.display(),
-                        attempts,
-                        e
-                    );
-                    let _ = sleep(Duration::from_secs(5));
+        let file_hash = Hash::sha256_from_bytes(&compressed_nar_bytes);
+        let nar_key = format!("nar/{}.nar.{}", file_hash.to_typed_base32().strip_prefix("sha256:").unwrap(), compression_ext);
+
+        (compressed_nar_bytes, nar_key)
+    };
+
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match uploader.upload_bytes(compressed_nar_bytes.clone(), &nar_key).await {
+            Ok(_) => break,
+            Err(e) => {
+                if attempts >= 3 {
+                    return Err(e);
                 }
+                warn!(
+                    "Failed to upload NAR for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
+                    path.display(),
+                    attempts,
+                    e
+                );
+                let _ = sleep(Duration::from_secs(5));
             }
         }
     }
 
-    // 4. Generate and upload the .narinfo with retry logic.
-    let mut nar_info_content = get_nar_info(path, config).await?;
+    let file_hash = Hash::sha256_from_bytes(&compressed_nar_bytes);
+    let file_size = compressed_nar_bytes.len();
 
-    // Sign the path if signing is enabled.
-    if let (Some(key_path), Some(_key_name)) =
-        (&config.loft.signing_key_path, &config.loft.signing_key_name)
-    {
-        if !key_path.exists() {
-            warn!(
-                "Signing key file '{}' not found. Skipping signing.",
-                key_path.display()
-            );
-        } else {
-            info!(
-                "Signing path '{}' with key from file '{}'.",
-                path.display(),
-                key_path.display()
-            );
-            let key_file_content = fs::read_to_string(key_path)?;
-            debug!(
-                "Read key file from '{}', content length: {}",
-                key_path.display(),
-                key_file_content.len()
-            );
-            let nix_keypair = NixKeypair::from_str(&key_file_content)?;
+    let mut nar_info_content = String::new();
+    nar_info_content.push_str(&format!("StorePath: {}\n", path_info.path.as_os_str().to_string_lossy()));
+    nar_info_content.push_str(&format!("URL: {}\n", nar_key));
+    nar_info_content.push_str(&format!("Compression: {}\n", compression_ext));
+    nar_info_content.push_str(&format!("FileHash: {}\n", file_hash.to_typed_base32()));
+    nar_info_content.push_str(&format!("FileSize: {}\n", file_size));
+    nar_info_content.push_str(&format!("NarHash: {}\n", path_info.nar_hash.to_typed_base32()));
+    nar_info_content.push_str(&format!("NarSize: {}\n", path_info.nar_size));
+    nar_info_content.push_str(&format!(
+        "References: {}\n",
+        path_info.references.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" ")
+    ));
 
-            let mut nar_info = nix_manifest::from_str::<NarInfo>(&nar_info_content)?;
-            nar_info.sign(&nix_keypair);
-            nar_info_content = nix_manifest::to_string(&nar_info)?;
+    if !path_info.sigs.is_empty() {
+        for sig in &path_info.sigs {
+            nar_info_content.push_str(&format!("Sig: {}\n", sig));
         }
     }
 
-    // The .narinfo filename should be the hash of the store path it describes
+    if let Some(ca) = path_info.ca {
+        nar_info_content.push_str(&format!("CA: {}\n", ca));
+    }
+
+    if let (Some(key_path), Some(key_name)) = (&config.loft.signing_key_path, &config.loft.signing_key_name) {
+        if !key_path.exists() {
+            warn!("Signing key file '{}' not found. Skipping signing.", key_path.display());
+        } else {
+            info!("Signing path '{}' with key from file '{}'.", path.display(), key_path.display());
+            let key_file_content = fs::read_to_string(key_path)?;
+            let nix_keypair = NixKeypair::from_str(&key_file_content)?;
+
+            let mut lines: Vec<String> = nar_info_content.lines().map(|s| s.to_string()).collect();
+            lines.retain(|line| !line.starts_with(&format!("Sig: {}:", key_name)));
+            nar_info_content = lines.join("\n");
+            nar_info_content.push('\n');
+
+            let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&nar_info_content)?;
+            let fingerprint = nar_info_for_signing.fingerprint();
+            let signature = nix_keypair.sign(&fingerprint);
+            nar_info_content.push_str(&format!("Sig: {}:{}
+", key_name, signature));
+        }
+    }
+
     let narinfo_key = get_narinfo_key(&store_path_obj);
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match uploader
-            .upload_bytes(nar_info_content.clone().into_bytes(), &narinfo_key)
-            .await
-        {
+        match uploader.upload_bytes(nar_info_content.clone().into_bytes(), &narinfo_key).await {
             Ok(_) => break,
             Err(e) => {
                 if attempts >= 3 {

@@ -12,9 +12,9 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use aws_sdk_s3::types::CompletedPart;
+use chrono::{DateTime, Utc};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use chrono::{DateTime, Utc};
 
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
@@ -187,7 +187,11 @@ impl S3Uploader {
 
     /// Uploads a Nix store path to S3 as both NAR and narinfo files.
     /// This handles both directories and individual files correctly.
-    pub async fn upload_store_path(&self, store_path: &StorePath, config: &crate::config::Config) -> Result<()> {
+    pub async fn upload_store_path(
+        &self,
+        store_path: &StorePath,
+        config: &crate::config::Config,
+    ) -> Result<()> {
         info!("Uploading store path: {:?}", store_path);
 
         // 1. Query path info to get metadata
@@ -448,7 +452,10 @@ impl S3Uploader {
                 .send()
                 .await?;
 
-            info!("Successfully uploaded bytes to '{}' using multipart upload.", key);
+            info!(
+                "Successfully uploaded bytes to '{}' using multipart upload.",
+                key
+            );
         }
         Ok(())
     }
@@ -470,7 +477,10 @@ impl S3Uploader {
     }
 
     /// Lists objects in the S3 bucket.
-    pub async fn list_objects(&self, continuation_token: Option<String>) -> Result<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output> {
+    pub async fn list_objects(
+        &self,
+        continuation_token: Option<String>,
+    ) -> Result<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output> {
         let mut request = self.client.list_objects_v2().bucket(&self.bucket);
 
         if let Some(token) = continuation_token {
@@ -521,8 +531,6 @@ impl S3Uploader {
         Ok(total_size)
     }
 }
-
-
 
 // Helper trait to convert aws_sdk_s3::types::DateTime to chrono::DateTime<Utc>
 pub trait AwsDateTimeExt {

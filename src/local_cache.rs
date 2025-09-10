@@ -21,6 +21,7 @@ impl LocalCache {
     /// Opens or creates a new local cache database.
     pub fn new(path: &Path) -> Result<Self> {
         let db = Database::create(path)?;
+        info!("Opening database at {:?}", path);
         let cache = LocalCache { db: Arc::new(db) };
         cache.initialize()?;
         Ok(cache)

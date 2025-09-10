@@ -89,7 +89,6 @@ async fn main() -> Result<()> {
     }
     // Initialize the local cache.
     let local_cache = Arc::new(LocalCache::new(&config.loft.local_cache_path)?);
-    local_cache.initialize()?;
 
     if args.clear_cache {
         info!(
