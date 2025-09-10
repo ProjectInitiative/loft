@@ -218,6 +218,11 @@ pub async fn get_nar_info(store_path: &Path, config: &Config) -> Result<String> 
     Ok(nar_info_content)
 }
 
+/// Gets the .narinfo key for a store path.
+pub fn get_narinfo_key(store_path: &attic::nix_store::StorePath) -> String {
+    format!("{}.narinfo", store_path.to_hash().as_str())
+}
+
 /// Dumps a store path to NAR bytes in memory.
 pub async fn dump_nar_to_bytes(store_path: &Path) -> Result<Vec<u8>> {
     let nix_store = NixStore::connect()?;
@@ -238,11 +243,15 @@ pub async fn upload_nar_for_path(
     uploader: Arc<S3Uploader>,
     path: &Path,
     config: &Config,
-    nar_hash_str: &str,
 ) -> Result<()> {
     let nix_store = NixStore::connect()?;
     let store_path_obj = nix_store.parse_store_path(path)?;
     let path_info = nix_store.query_path_info(store_path_obj.clone()).await?;
+
+    let nar_hash_b32_full = path_info.nar_hash.to_typed_base32();
+    let nar_hash_str = nar_hash_b32_full
+        .strip_prefix("sha256:")
+        .unwrap_or_default();
 
     let use_disk = config.loft.use_disk_for_large_nars
         && (path_info.nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
@@ -259,7 +268,7 @@ pub async fn upload_nar_for_path(
         // 1. Create a temporary file for the NAR
         let nar_temp_file = NamedTempFile::new()?;
         let mut nar_file = tokio::fs::File::create(nar_temp_file.path()).await?;
-        let mut adapter = nix_store.nar_from_path(store_path_obj);
+        let mut adapter = nix_store.nar_from_path(store_path_obj.clone());
         while let Some(chunk) = adapter.next().await {
             nar_file.write_all(chunk?.as_slice()).await?;
         }
@@ -398,7 +407,7 @@ pub async fn upload_nar_for_path(
     }
 
     // The .narinfo filename should be the hash of the store path it describes
-    let narinfo_key = format!("{}.narinfo", nar_hash_str);
+    let narinfo_key = get_narinfo_key(&store_path_obj);
     let mut attempts = 0;
     loop {
         attempts += 1;

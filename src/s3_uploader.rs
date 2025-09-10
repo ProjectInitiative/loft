@@ -100,26 +100,7 @@ impl S3Uploader {
                     }
                 };
 
-                let path_info = match nix_store.query_path_info(store_path.clone()).await {
-                    Ok(pi) => pi,
-                    Err(e) => {
-                        debug!("Failed to query path info for '{}': {}", path_str, e);
-                        return Err((path_str, e.to_string()));
-                    }
-                };
-
-                if !path_info.sigs.is_empty() {
-                    info!("Path '{}' has signatures: {:?}", path_str, path_info.sigs);
-                }
-
-                let key = format!(
-                    "{}.narinfo",
-                    path_info
-                        .nar_hash
-                        .to_typed_base32()
-                        .strip_prefix("sha256:")
-                        .unwrap_or_default()
-                );
+                let key = crate::nix_utils::get_narinfo_key(&store_path);
                 debug!("Checking S3 for key: {}", key);
 
                 match client.head_object().bucket(&bucket).key(&key).send().await {
@@ -242,7 +223,7 @@ impl S3Uploader {
 
         // 4. Generate and upload .narinfo file
         let narinfo_content = self.generate_narinfo_content(&path_info, &nar_key).await?;
-        let narinfo_key = format!("{}.narinfo", nar_hash_b32);
+        let narinfo_key = crate::nix_utils::get_narinfo_key(store_path);
 
         self.upload_bytes(narinfo_content.into_bytes(), &narinfo_key)
             .await?;

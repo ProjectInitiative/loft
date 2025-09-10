@@ -77,18 +77,11 @@ pub async fn scan_and_process_existing_paths(
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
     let mut tasks = Vec::new();
 
-    for (path_str, path_info) in result.to_upload {
+    for (path_str, _path_info) in result.to_upload {
         let uploader_clone = uploader.clone();
         let local_cache_clone = local_cache.clone();
         let config_clone = config.clone();
         let semaphore_clone = semaphore.clone();
-        let plain_hash = path_info
-            .nar_hash
-            .to_typed_base32()
-            .strip_prefix("sha256:")
-            .unwrap_or_default()
-            .to_string();
-
         tasks.push(tokio::spawn(async move {
             let permit = semaphore_clone.acquire_owned().await.unwrap();
             let (tx, rx) = oneshot::channel();
@@ -96,7 +89,6 @@ pub async fn scan_and_process_existing_paths(
             let p = Path::new(&path_str).to_path_buf();
             let uploader_clone_block = uploader_clone.clone();
             let config_clone_block = config_clone.clone();
-            let plain_hash_clone_block = plain_hash.clone();
 
             tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -108,7 +100,6 @@ pub async fn scan_and_process_existing_paths(
                         uploader_clone_block,
                         &p,
                         &config_clone_block,
-                        &plain_hash_clone_block,
                     )
                     .await
                 });
@@ -117,7 +108,10 @@ pub async fn scan_and_process_existing_paths(
 
             match rx.await {
                 Ok(Ok(_)) => {
-                    if let Err(e) = local_cache_clone.add_path_hash(&plain_hash) {
+                    let store_path = NixStore::connect().unwrap().parse_store_path(Path::new(&path_str)).unwrap();
+                    let path_hash_obj = store_path.to_hash();
+                    let path_hash = path_hash_obj.as_str();
+                    if let Err(e) = local_cache_clone.add_path_hash(path_hash) {
                         error!(
                             "Failed to add path {} to local cache: {:?}",
                             path_str, e
@@ -240,22 +234,14 @@ pub async fn process_path(
         .await?;
 
     // 5. Upload missing
-    for (path_str, path_info) in result.to_upload {
+    for (path_str, _path_info) in result.to_upload {
         let uploader_clone = uploader.clone();
         let local_cache_clone = local_cache.clone();
         let config_clone = config.clone();
-        let plain_hash = path_info
-            .nar_hash
-            .to_typed_base32()
-            .strip_prefix("sha256:")
-            .unwrap_or_default()
-            .to_string();
-
         let (tx, rx) = oneshot::channel();
         let p = Path::new(&path_str).to_path_buf();
         let uploader_clone_block = uploader_clone.clone();
         let config_clone_block = config_clone.clone();
-        let plain_hash_clone_block = plain_hash.clone();
 
         tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -267,7 +253,6 @@ pub async fn process_path(
                     uploader_clone_block,
                     &p,
                     &config_clone_block,
-                    &plain_hash_clone_block,
                 )
                 .await
             });
@@ -276,7 +261,10 @@ pub async fn process_path(
 
         match rx.await {
             Ok(Ok(_)) => {
-                if let Err(e) = local_cache_clone.add_path_hash(&plain_hash) {
+                let store_path = NixStore::connect().unwrap().parse_store_path(Path::new(&path_str)).unwrap();
+                let path_hash_obj = store_path.to_hash();
+                let path_hash = path_hash_obj.as_str();
+                if let Err(e) = local_cache_clone.add_path_hash(path_hash) {
                     error!(
                         "Failed to add path {} to local cache: {:?}",
                         path_str, e
