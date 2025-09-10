@@ -307,28 +307,25 @@ pub async fn upload_nar_for_path(
     let file_hash = Hash::sha256_from_bytes(&compressed_nar_bytes);
     let file_size = compressed_nar_bytes.len();
 
-    let mut nar_info_content = String::new();
-    nar_info_content.push_str(&format!("StorePath: {}\n", path_info.path.as_os_str().to_string_lossy()));
-    nar_info_content.push_str(&format!("URL: {}\n", nar_key));
-    nar_info_content.push_str(&format!("Compression: {}\n", compression_ext));
-    nar_info_content.push_str(&format!("FileHash: {}\n", file_hash.to_typed_base32()));
-    nar_info_content.push_str(&format!("FileSize: {}\n", file_size));
-    nar_info_content.push_str(&format!("NarHash: {}\n", path_info.nar_hash.to_typed_base32()));
-    nar_info_content.push_str(&format!("NarSize: {}\n", path_info.nar_size));
-    nar_info_content.push_str(&format!(
+    let mut nar_info_content_base = String::new();
+    nar_info_content_base.push_str(&format!("StorePath: {}\n", path_info.path.as_os_str().to_string_lossy()));
+    nar_info_content_base.push_str(&format!("URL: {}\n", nar_key));
+    nar_info_content_base.push_str(&format!("Compression: {}\n", compression_ext));
+    nar_info_content_base.push_str(&format!("FileHash: {}\n", file_hash.to_typed_base32()));
+    nar_info_content_base.push_str(&format!("FileSize: {}\n", file_size));
+    nar_info_content_base.push_str(&format!("NarHash: {}\n", path_info.nar_hash.to_typed_base32()));
+    nar_info_content_base.push_str(&format!("NarSize: {}\n", path_info.nar_size));
+    nar_info_content_base.push_str(&format!(
         "References: {}\n",
         path_info.references.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" ")
     ));
 
-    if !path_info.sigs.is_empty() {
-        for sig in &path_info.sigs {
-            nar_info_content.push_str(&format!("Sig: {}\n", sig));
-        }
+    if let Some(ca) = path_info.ca {
+        nar_info_content_base.push_str(&format!("CA: {}\n", ca));
     }
 
-    if let Some(ca) = path_info.ca {
-        nar_info_content.push_str(&format!("CA: {}\n", ca));
-    }
+    let mut final_nar_info_content = nar_info_content_base.clone();
+    let mut new_signature_key_name: Option<String> = None;
 
     if let (Some(key_path), Some(key_name)) = (&config.loft.signing_key_path, &config.loft.signing_key_name) {
         if !key_path.exists() {
@@ -338,16 +335,28 @@ pub async fn upload_nar_for_path(
             let key_file_content = fs::read_to_string(key_path)?;
             let nix_keypair = NixKeypair::from_str(&key_file_content)?;
 
-            let mut lines: Vec<String> = nar_info_content.lines().map(|s| s.to_string()).collect();
-            lines.retain(|line| !line.starts_with(&format!("Sig: {}:", key_name)));
-            nar_info_content = lines.join("\n");
-            nar_info_content.push('\n');
-
-            let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&nar_info_content)?;
+            let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&nar_info_content_base)?;
             let fingerprint = nar_info_for_signing.fingerprint();
-            let signature = nix_keypair.sign(&fingerprint);
-            nar_info_content.push_str(&format!("Sig: {}:{}
-", key_name, signature));
+            let full_signature_string = nix_keypair.sign(&fingerprint);
+            let signature_value = full_signature_string.split_once(':').map(|(_, val)| val).unwrap_or("");
+
+            final_nar_info_content.push_str(&format!("Sig: {}:{}\n", key_name, signature_value));
+            new_signature_key_name = Some(key_name.clone());
+        }
+    }
+
+    // Add existing signatures, excluding the one we just added (if any)
+    if !path_info.sigs.is_empty() {
+        for sig in &path_info.sigs {
+            if let Some(existing_key_name) = sig.split_once(':').map(|(key, _)| key) {
+                if let Some(new_key) = &new_signature_key_name {
+                    if existing_key_name == new_key {
+                        // Skip if we just added this key's signature
+                        continue;
+                    }
+                }
+            }
+            final_nar_info_content.push_str(&format!("Sig: {}\n", sig));
         }
     }
 
@@ -355,7 +364,28 @@ pub async fn upload_nar_for_path(
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match uploader.upload_bytes(nar_info_content.clone().into_bytes(), &narinfo_key).await {
+        match uploader.upload_bytes(final_nar_info_content.clone().into_bytes(), &narinfo_key).await {
+            Ok(_) => break,
+            Err(e) => {
+                if attempts >= 3 {
+                    return Err(e);
+                }
+                warn!(
+                    "Failed to upload .narinfo for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
+                    path.display(),
+                    attempts,
+                    e
+                );
+                let _ = sleep(Duration::from_secs(5));
+            }
+        }
+    }
+
+    let narinfo_key = get_narinfo_key(&store_path_obj);
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match uploader.upload_bytes(final_nar_info_content.clone().into_bytes(), &narinfo_key).await {
             Ok(_) => break,
             Err(e) => {
                 if attempts >= 3 {
