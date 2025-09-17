@@ -53,8 +53,7 @@ pub async fn scan_and_process_existing_paths(
     // 3. Get signatures for the closure and filter again
     let closure_signatures =
         nix::get_path_signatures(all_closure_paths.into_iter().collect()).await?;
-    let filtered_closure_paths =
-        nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
+    let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
     let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
     info!(
         "Total paths after filtering closure: {}",
@@ -96,33 +95,31 @@ pub async fn scan_and_process_existing_paths(
                     .build()
                     .unwrap();
                 let result = rt.block_on(async {
-                    nix::upload_nar_for_path(
-                        uploader_clone_block,
-                        &p,
-                        &config_clone_block,
-                    )
-                    .await
+                    nix::upload_nar_for_path(uploader_clone_block, &p, &config_clone_block).await
                 });
                 let _ = tx.send(result);
             });
 
             match rx.await {
                 Ok(Ok(_)) => {
-                    let store_path = NixStore::connect().unwrap().parse_store_path(Path::new(&path_str)).unwrap();
+                    let store_path = NixStore::connect()
+                        .unwrap()
+                        .parse_store_path(Path::new(&path_str))
+                        .unwrap();
                     let path_hash_obj = store_path.to_hash();
                     let path_hash = path_hash_obj.as_str();
                     if let Err(e) = local_cache_clone.add_path_hash(path_hash) {
-                        error!(
-                            "Failed to add path {} to local cache: {:?}",
-                            path_str, e
-                        );
+                        error!("Failed to add path {} to local cache: {:?}", path_str, e);
                     }
                 }
                 Ok(Err(e)) => {
                     error!("Failed to upload path {}: {:?}", path_str, e);
                 }
                 Err(_) => {
-                    error!("Upload task for path {} failed unexpectedly (thread panicked).", path_str);
+                    error!(
+                        "Upload task for path {} failed unexpectedly (thread panicked).",
+                        path_str
+                    );
                 }
             }
             drop(permit);
@@ -215,10 +212,8 @@ pub async fn process_path(
     let closure = nix::get_store_path_closure(&path_str).await?;
 
     // 3. Get signatures for the closure and filter again
-    let closure_signatures =
-        nix::get_path_signatures(closure.into_iter().collect()).await?;
-    let filtered_closure_paths =
-        nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
+    let closure_signatures = nix::get_path_signatures(closure.into_iter().collect()).await?;
+    let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
     let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
     info!(
         "Total paths after filtering closure for {}: {}",
@@ -249,33 +244,31 @@ pub async fn process_path(
                 .build()
                 .unwrap();
             let result = rt.block_on(async {
-                nix::upload_nar_for_path(
-                    uploader_clone_block,
-                    &p,
-                    &config_clone_block,
-                )
-                .await
+                nix::upload_nar_for_path(uploader_clone_block, &p, &config_clone_block).await
             });
             let _ = tx.send(result);
         });
 
         match rx.await {
             Ok(Ok(_)) => {
-                let store_path = NixStore::connect().unwrap().parse_store_path(Path::new(&path_str)).unwrap();
+                let store_path = NixStore::connect()
+                    .unwrap()
+                    .parse_store_path(Path::new(&path_str))
+                    .unwrap();
                 let path_hash_obj = store_path.to_hash();
                 let path_hash = path_hash_obj.as_str();
                 if let Err(e) = local_cache_clone.add_path_hash(path_hash) {
-                    error!(
-                        "Failed to add path {} to local cache: {:?}",
-                        path_str, e
-                    );
+                    error!("Failed to add path {} to local cache: {:?}", path_str, e);
                 }
             }
             Ok(Err(e)) => {
                 error!("Failed to upload path {}: {:?}", path_str, e);
             }
             Err(_) => {
-                error!("Upload task for path {} failed unexpectedly (thread panicked).", path_str);
+                error!(
+                    "Upload task for path {} failed unexpectedly (thread panicked).",
+                    path_str
+                );
             }
         }
     }
