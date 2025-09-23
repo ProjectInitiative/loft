@@ -308,7 +308,7 @@ pub async fn upload_nar_for_path(
     let file_size = compressed_nar_bytes.len();
 
     let mut nar_info_content_base = String::new();
-    nar_info_content_base.push_str(&format!("StorePath: {}\n", path_info.path.as_os_str().to_string_lossy()));
+    nar_info_content_base.push_str(&format!("StorePath: {}\n", path.display()));
     nar_info_content_base.push_str(&format!("URL: {}\n", nar_key));
     nar_info_content_base.push_str(&format!("Compression: {}\n", compression_ext));
     nar_info_content_base.push_str(&format!("FileHash: {}\n", file_hash.to_typed_base32()));
