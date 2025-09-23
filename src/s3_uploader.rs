@@ -18,7 +18,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
-use attic::nix_store::StorePath;
+
 
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
 
@@ -26,7 +26,6 @@ const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
 pub struct S3Uploader {
     client: Client,
     bucket: String,
-    nix_store: NixStore,
 }
 
 impl S3Uploader {
@@ -63,12 +62,9 @@ impl S3Uploader {
 
         let client = Client::from_conf(s3_config);
 
-        let nix_store = NixStore::connect()?;
-
         Ok(S3Uploader {
             client,
             bucket: config.bucket.clone(),
-            nix_store,
         })
     }
 
@@ -185,106 +181,7 @@ impl S3Uploader {
         Ok(all_keys)
     }
 
-    /// Uploads a Nix store path to S3 as both NAR and narinfo files.
-    /// This handles both directories and individual files correctly.
-    // pub async fn upload_store_path(
-    //     &self,
-    //     store_path: &StorePath,
-    //     config: &crate::config::Config,
-    // ) -> Result<()> {
-    //     info!("Uploading store path: {:?}", store_path);
-
-    //     // 1. Query path info to get metadata
-    //     let path_info = self.nix_store.query_path_info(store_path.clone()).await?;
-
-    //     // 2. Generate NAR from the store path (works for both files and directories)
-    //     let nar_stream = self.nix_store.nar_from_path(store_path.clone());
-
-    //     // Collect the NAR stream into bytes
-    //     // Note: You might want to stream this directly to S3 for large NARs
-    //     let mut nar_bytes = Vec::new();
-    //     let mut stream = nar_stream;
-    //     while let Some(chunk) = stream.next().await {
-    //         let chunk = chunk?;
-    //         nar_bytes.extend_from_slice(&chunk);
-    //     }
-
-    //     // 3. Upload NAR file
-    //     let nar_hash_b32_full = path_info.nar_hash.to_typed_base32();
-    //     let nar_hash_b32 = nar_hash_b32_full
-    //         .strip_prefix("sha256:")
-    //         .unwrap_or_default();
-
-    //     let compression_ext = match config.loft.compression {
-    //         crate::config::Compression::Xz => "xz",
-    //         crate::config::Compression::Zstd => "zst",
-    //     };
-    //     let nar_key = format!("nar/{}.nar.{}", nar_hash_b32, compression_ext);
-
-    //     // For production, you'd want to compress the NAR with xz here
-    //     // For now, let's upload uncompressed (you can add compression later)
-    //     self.upload_bytes(nar_bytes, &nar_key).await?;
-
-    //     // 4. Generate and upload .narinfo file
-    //     let narinfo_content = self
-    //         .generate_narinfo_content(&path_info, &nar_key, compression_ext)
-    //         .await?;
-    //     let narinfo_key = crate::nix_utils::get_narinfo_key(store_path);
-
-    //     self.upload_bytes(narinfo_content.into_bytes(), &narinfo_key)
-    //         .await?;
-
-    //     info!("Successfully uploaded store path: {:?}", store_path);
-    //     Ok(())
-    // }
-
-    /// Generates the content for a .narinfo file
-    // async fn generate_narinfo_content(
-    //     &self,
-    //     path_info: &attic::nix_store::ValidPathInfo,
-    //     nar_key: &str,
-    //     compression: &str,
-    // ) -> Result<String> {
-    //     let full_path = self
-    //         .nix_store
-    //         .get_full_path(&path_info.path)
-    //         .to_string_lossy()
-    //         .to_string();
-    //     debug!("Full store path for narinfo: {}", full_path);
-
-    //     // Basic narinfo format - you may need to adjust based on your attic PathInfo structure
-    //     let content = format!(
-    //         "StorePath: {}\n\
-    //          URL: {}\n\
-    //          Compression: {}\n\
-    //          FileHash: {}\n\
-    //          FileSize: {}\n\
-    //          NarHash: {}\n\
-    //          NarSize: {}\n\
-    //          References: {}\n",
-    //         full_path,
-    //         nar_key,
-    //         compression,
-    //         path_info.nar_hash.to_typed_base32(), // Assuming this is file hash for uncompressed
-    //         path_info.nar_size,                   // File size
-    //         path_info.nar_hash.to_typed_base32(),
-    //         path_info.nar_size,
-    //         path_info
-    //             .references
-    //             .iter()
-    //             .map(|r| r.to_string_lossy().to_string())
-    //             .collect::<Vec<_>>()
-    //             .join(" ")
-    //     );
-
-    //     // Add signatures if present
-    //     let mut final_content = content;
-    //     for sig in &path_info.sigs {
-    //         final_content.push_str(&format!("Sig: {}\n", sig));
-    //     }
-
-    //     Ok(final_content)
-    // }
+    
 
     /// Uploads a file to S3, using multipart upload for large files.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {

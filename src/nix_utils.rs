@@ -26,6 +26,9 @@ use attic::signing::NixKeypair; // Added this line
 use crate::config::{Config, Compression};
 use crate::nix_manifest::{self, NarInfo};
 use crate::s3_uploader::S3Uploader;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use nix_base32;
 
 #[derive(Debug, Clone)]
 pub enum Signature {
@@ -200,20 +203,75 @@ pub async fn upload_nar_for_path(
     path: &Path,
     config: &Config,
 ) -> Result<()> {
+    let output = Command::new("nix")
+        .arg("path-info")
+        .arg("--json")
+        .arg(path)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "nix path-info failed for {}: {}",
+            path.display(),
+            stderr
+        ));
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let json: Value = serde_json::from_str(&stdout)?;
+    let path_info_json = &json[path.to_str().unwrap()];
+
+    if path_info_json.is_null() {
+        return Err(anyhow!("Path {} not found in nix store", path.display()));
+    }
+
+    let deriver = path_info_json["deriver"].as_str().map(|s| s.to_string());
+    let nar_hash_sri = path_info_json["narHash"].as_str().unwrap();
+    let nar_size = path_info_json["narSize"].as_u64().unwrap();
+    let references_json = path_info_json["references"].as_array().unwrap();
+    let sigs: Vec<String> = path_info_json["signatures"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect();
+
+    let nar_hash_base64 = nar_hash_sri.strip_prefix("sha256-").unwrap();
+    let nar_hash_bytes = BASE64_STANDARD.decode(nar_hash_base64)?;
+    let nar_hash_base32 = nix_base32::to_nix_base32(&nar_hash_bytes);
+    let nar_hash_typed = format!("sha256:{}", nar_hash_base32);
+
+    let references: Vec<String> = references_json
+        .iter()
+        .map(|r| {
+            let full_path = r.as_str().unwrap();
+            Path::new(full_path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+
     let nix_store = NixStore::connect()?;
     let store_path_obj = nix_store.parse_store_path(path)?;
-    let path_info = nix_store.query_path_info(store_path_obj.clone()).await?;
 
-    let use_disk = config.loft.use_disk_for_large_nars
-        && (path_info.nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
+    let use_disk =
+        config.loft.use_disk_for_large_nars && (nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
 
     let compression_ext = match config.loft.compression {
         Compression::Xz => "xz",
-        Compression::Zstd => "zstd",
+        Compression::Zstd => "zst",
     };
 
     let (compressed_nar_bytes, nar_key) = if use_disk {
-        info!("Path '{}' is large, using on-disk NAR creation.", path.display());
+        info!(
+            "Path '{}' is large, using on-disk NAR creation.",
+            path.display()
+        );
 
         let nar_temp_file = NamedTempFile::new()?;
         let mut nar_file = tokio::fs::File::create(nar_temp_file.path()).await?;
@@ -246,12 +304,21 @@ pub async fn upload_nar_for_path(
                 }
             }
             Ok::<(), anyhow::Error>(())
-        }).await??;
-        info!("Compressed NAR for '{}' on disk with {:?}.", path.display(), config.loft.compression);
+        })
+        .await??;
+        info!(
+            "Compressed NAR for '{}' on disk with {:?}.",
+            path.display(),
+            config.loft.compression
+        );
 
         let compressed_bytes = tokio::fs::read(compressed_temp_file.path()).await?;
         let file_hash = Hash::sha256_from_bytes(&compressed_bytes);
-        let nar_key = format!("nar/{}.nar.{}", file_hash.to_typed_base32().strip_prefix("sha256:").unwrap(), compression_ext);
+        let nar_key = format!(
+            "nar/{}.nar.{}",
+            file_hash.to_typed_base32().strip_prefix("sha256:").unwrap(),
+            compression_ext
+        );
 
         (compressed_bytes, nar_key)
     } else {
@@ -275,11 +342,20 @@ pub async fn upload_nar_for_path(
                 }
             }?;
             Ok(compressed_bytes)
-        }).await??;
-        info!("Compressed NAR for '{}' with {:?}.", path.display(), config.loft.compression);
+        })
+        .await??;
+        info!(
+            "Compressed NAR for '{}' with {:?}.",
+            path.display(),
+            config.loft.compression
+        );
 
         let file_hash = Hash::sha256_from_bytes(&compressed_nar_bytes);
-        let nar_key = format!("nar/{}.nar.{}", file_hash.to_typed_base32().strip_prefix("sha256:").unwrap(), compression_ext);
+        let nar_key = format!(
+            "nar/{}.nar.{}",
+            file_hash.to_typed_base32().strip_prefix("sha256:").unwrap(),
+            compression_ext
+        );
 
         (compressed_nar_bytes, nar_key)
     };
@@ -287,7 +363,10 @@ pub async fn upload_nar_for_path(
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match uploader.upload_bytes(compressed_nar_bytes.clone(), &nar_key).await {
+        match uploader
+            .upload_bytes(compressed_nar_bytes.clone(), &nar_key)
+            .await
+        {
             Ok(_) => break,
             Err(e) => {
                 if attempts >= 3 {
@@ -313,32 +392,40 @@ pub async fn upload_nar_for_path(
     nar_info_content_base.push_str(&format!("Compression: {}\n", compression_ext));
     nar_info_content_base.push_str(&format!("FileHash: {}\n", file_hash.to_typed_base32()));
     nar_info_content_base.push_str(&format!("FileSize: {}\n", file_size));
-    nar_info_content_base.push_str(&format!("NarHash: {}\n", path_info.nar_hash.to_typed_base32()));
-    nar_info_content_base.push_str(&format!("NarSize: {}\n", path_info.nar_size));
-    nar_info_content_base.push_str(&format!(
-        "References: {}\n",
-        path_info.references.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" ")
-    ));
+    nar_info_content_base.push_str(&format!("NarHash: {}\n", nar_hash_typed));
+    nar_info_content_base.push_str(&format!("NarSize: {}\n", nar_size));
+    nar_info_content_base.push_str(&format!("References: {}\n", references.join(" ")));
 
-    if let Some(ca) = path_info.ca {
-        nar_info_content_base.push_str(&format!("CA: {}\n", ca));
+    if let Some(deriver_path) = deriver {
+        nar_info_content_base.push_str(&format!("Deriver: {}\n", deriver_path));
     }
 
     let mut final_nar_info_content = nar_info_content_base.clone();
     let mut new_signature_key_name: Option<String> = None;
 
-    if let (Some(key_path), Some(key_name)) = (&config.loft.signing_key_path, &config.loft.signing_key_name) {
+    if let (Some(key_path), Some(key_name)) = (
+        &config.loft.signing_key_path,
+        &config.loft.signing_key_name,
+    ) {
         if !key_path.exists() {
-            warn!("Signing key file '{}' not found. Skipping signing.", key_path.display());
+            warn!(
+                "Signing key file '{}' not found. Skipping signing.",
+                key_path.display()
+            );
         } else {
-            info!("Signing path '{}' with key from file '{}'.", path.display(), key_path.display());
+            info!(
+                "Signing path '{}' with key from file '{}'.",
+                path.display(),
+                key_path.display()
+            );
             let key_file_content = fs::read_to_string(key_path)?;
             let nix_keypair = NixKeypair::from_str(&key_file_content)?;
 
             let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&nar_info_content_base)?;
             let fingerprint = nar_info_for_signing.fingerprint();
             let full_signature_string = nix_keypair.sign(&fingerprint);
-            let signature_value = full_signature_string.split_once(':').map(|(_, val)| val).unwrap_or("");
+            let signature_value =
+                full_signature_string.split_once(':').map(|(_, val)| val).unwrap_or("");
 
             final_nar_info_content.push_str(&format!("Sig: {}:{}\n", key_name, signature_value));
             new_signature_key_name = Some(key_name.clone());
@@ -346,8 +433,8 @@ pub async fn upload_nar_for_path(
     }
 
     // Add existing signatures, excluding the one we just added (if any)
-    if !path_info.sigs.is_empty() {
-        for sig in &path_info.sigs {
+    if !sigs.is_empty() {
+        for sig in &sigs {
             if let Some(existing_key_name) = sig.split_once(':').map(|(key, _)| key) {
                 if let Some(new_key) = &new_signature_key_name {
                     if existing_key_name == new_key {
@@ -364,28 +451,10 @@ pub async fn upload_nar_for_path(
     let mut attempts = 0;
     loop {
         attempts += 1;
-        match uploader.upload_bytes(final_nar_info_content.clone().into_bytes(), &narinfo_key).await {
-            Ok(_) => break,
-            Err(e) => {
-                if attempts >= 3 {
-                    return Err(e);
-                }
-                warn!(
-                    "Failed to upload .narinfo for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
-                    path.display(),
-                    attempts,
-                    e
-                );
-                let _ = sleep(Duration::from_secs(5));
-            }
-        }
-    }
-
-    let narinfo_key = get_narinfo_key(&store_path_obj);
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        match uploader.upload_bytes(final_nar_info_content.clone().into_bytes(), &narinfo_key).await {
+        match uploader
+            .upload_bytes(final_nar_info_content.clone().into_bytes(), &narinfo_key)
+            .await
+        {
             Ok(_) => break,
             Err(e) => {
                 if attempts >= 3 {
