@@ -230,7 +230,7 @@ secret_key = "$AWS_SECRET_ACCESS_KEY"
 upload_threads = $LOFT_UPLOAD_THREADS
 scan_on_startup = $LOFT_SCAN_ON_STARTUP
 local_cache_path = ".direnv/cache.db"
-compression = "xz"
+compression = "zstd"
 EOF
               if [ -n "$LOFT_USE_DISK_FOR_LARGE_NARS" ]; then
                 echo "use_disk_for_large_nars = $LOFT_USE_DISK_FOR_LARGE_NARS" >> "$LOFT_CONFIG_DIR/loft.toml"

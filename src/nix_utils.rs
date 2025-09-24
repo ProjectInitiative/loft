@@ -260,9 +260,9 @@ pub async fn upload_nar_for_path(
     let use_disk = config.loft.use_disk_for_large_nars
         && (nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
 
-    let compression_ext = match config.loft.compression {
-        Compression::Xz => "xz",
-        Compression::Zstd => "zst",
+    let (compression_ext, compression_field) = match config.loft.compression {
+        Compression::Xz => ("xz", "xz"),
+        Compression::Zstd => ("zst", "zstd"),
     };
 
     let (compressed_nar_bytes, nar_key) = if use_disk {
@@ -387,7 +387,7 @@ pub async fn upload_nar_for_path(
     let mut nar_info_content_base = String::new();
     nar_info_content_base.push_str(&format!("StorePath: {}\n", path.display()));
     nar_info_content_base.push_str(&format!("URL: {}\n", nar_key));
-    nar_info_content_base.push_str(&format!("Compression: {}\n", compression_ext));
+    nar_info_content_base.push_str(&format!("Compression: {}\n", compression_field));
     nar_info_content_base.push_str(&format!("FileHash: {}\n", file_hash.to_typed_base32()));
     nar_info_content_base.push_str(&format!("FileSize: {}\n", file_size));
     nar_info_content_base.push_str(&format!("NarHash: {}\n", nar_hash_typed));

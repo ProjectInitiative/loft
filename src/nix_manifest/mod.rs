@@ -18,14 +18,12 @@
 //!
 //! [1] <https://github.com/NixOS/nix/blob/d581129ef9ef5d7d65e676f6a7bfe36c82f6ea6e/src/libstore/nar-info.cc#L28>
 
-
-
 // #[cfg(test)]
 // mod tests;
 
 use std::fmt::Display;
-use std::path::{Path, PathBuf};
 use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 use displaydoc::Display;
 use serde::{de, ser, Deserialize, Serialize};
@@ -34,9 +32,9 @@ use serde_with::{formats::SpaceSeparator, serde_as, StringWithSeparator};
 mod deserializer;
 mod serializer;
 
-use anyhow::Result;
 use self::deserializer::Deserializer;
 use self::serializer::Serializer;
+use anyhow::Result;
 
 use attic::hash::Hash;
 use attic::signing::NixKeypair;
@@ -47,7 +45,8 @@ where
     T: for<'de> Deserialize<'de>,
 {
     let mut deserializer = Deserializer::from_str(s);
-    T::deserialize(&mut deserializer).map_err(|e| anyhow::anyhow!("Manifest deserialization error: {}", e))
+    T::deserialize(&mut deserializer)
+        .map_err(|e| anyhow::anyhow!("Manifest deserialization error: {}", e))
 
     // FIXME: Reject extra output??
 }
@@ -227,6 +226,18 @@ pub enum Compression {
 }
 
 impl NarInfo {
+    pub fn normalize_url(&mut self) {
+        if let Some(ext_pos) = self.url.rfind(".nar.") {
+            let suffix = match self.compression {
+                Compression::Xz => "xz",
+                Compression::Bzip2 => "bz2",
+                Compression::Brotli => "br",
+                Compression::Zstd => "zst",
+                Compression::None => "nar",
+            };
+            self.url = format!("{}{}", &self.url[..ext_pos + 5], suffix);
+        }
+    }
     /// Parses a narinfo from a string.
     pub fn from_str(manifest: &str) -> Result<Self> {
         from_str(manifest)
