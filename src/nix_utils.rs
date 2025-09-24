@@ -9,10 +9,10 @@ use futures::stream::StreamExt;
 use serde_json::Value;
 
 use std::io::{Read, Write};
-use tokio::io::AsyncWriteExt;
-use tempfile::NamedTempFile;
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::NamedTempFile;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -23,11 +23,11 @@ use attic::hash::Hash;
 use attic::nix_store::NixStore; // Keep NixStore
 use attic::signing::NixKeypair; // Added this line
 
-use crate::config::{Config, Compression};
+use crate::config::{Compression, Config};
 use crate::nix_manifest::{self, NarInfo};
 use crate::s3_uploader::S3Uploader;
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use nix_base32;
 
 #[derive(Debug, Clone)]
@@ -175,8 +175,6 @@ pub async fn get_store_paths_closure(store_paths: Vec<String>) -> Result<Vec<Str
         .collect())
 }
 
-
-
 /// Gets the .narinfo key for a store path.
 pub fn get_narinfo_key(store_path: &attic::nix_store::StorePath) -> String {
     format!("{}.narinfo", store_path.to_hash().as_str())
@@ -259,8 +257,8 @@ pub async fn upload_nar_for_path(
     let nix_store = NixStore::connect()?;
     let store_path_obj = nix_store.parse_store_path(path)?;
 
-    let use_disk =
-        config.loft.use_disk_for_large_nars && (nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
+    let use_disk = config.loft.use_disk_for_large_nars
+        && (nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
 
     let compression_ext = match config.loft.compression {
         Compression::Xz => "xz",
@@ -293,7 +291,7 @@ pub async fn upload_nar_for_path(
             match compression_type {
                 Compression::Xz => {
                     let nar_file = std::fs::File::open(&nar_path)?;
-                    let mut encoder = XzEncoder::new(nar_file, 9);
+                    let mut encoder = XzEncoder::new(nar_file, 6);
                     std::io::copy(&mut encoder, &mut compressed_writer)?;
                 }
                 Compression::Zstd => {
@@ -329,7 +327,7 @@ pub async fn upload_nar_for_path(
         let compressed_nar_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
             let compressed_bytes = match config_clone.loft.compression {
                 Compression::Xz => {
-                    let mut encoder = XzEncoder::new(&nar_bytes[..], 9);
+                    let mut encoder = XzEncoder::new(&nar_bytes[..], 6);
                     let mut compressed = Vec::new();
                     encoder.read_to_end(&mut compressed)?;
                     Ok(compressed)
@@ -397,16 +395,19 @@ pub async fn upload_nar_for_path(
     nar_info_content_base.push_str(&format!("References: {}\n", references.join(" ")));
 
     if let Some(deriver_path) = deriver {
-        nar_info_content_base.push_str(&format!("Deriver: {}\n", deriver_path));
+        let deriver_basename = Path::new(&deriver_path)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(&deriver_path);
+        nar_info_content_base.push_str(&format!("Deriver: {}\n", deriver_basename));
     }
 
     let mut final_nar_info_content = nar_info_content_base.clone();
     let mut new_signature_key_name: Option<String> = None;
 
-    if let (Some(key_path), Some(key_name)) = (
-        &config.loft.signing_key_path,
-        &config.loft.signing_key_name,
-    ) {
+    if let (Some(key_path), Some(key_name)) =
+        (&config.loft.signing_key_path, &config.loft.signing_key_name)
+    {
         if !key_path.exists() {
             warn!(
                 "Signing key file '{}' not found. Skipping signing.",
@@ -424,8 +425,10 @@ pub async fn upload_nar_for_path(
             let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&nar_info_content_base)?;
             let fingerprint = nar_info_for_signing.fingerprint();
             let full_signature_string = nix_keypair.sign(&fingerprint);
-            let signature_value =
-                full_signature_string.split_once(':').map(|(_, val)| val).unwrap_or("");
+            let signature_value = full_signature_string
+                .split_once(':')
+                .map(|(_, val)| val)
+                .unwrap_or("");
 
             final_nar_info_content.push_str(&format!("Sig: {}:{}\n", key_name, signature_value));
             new_signature_key_name = Some(key_name.clone());
