@@ -23,6 +23,7 @@ let
       use_disk_for_large_nars = cfg.useDiskForLargeNars;
       large_nar_threshold_mb = cfg.largeNarThresholdMb;
       compression = cfg.compression;
+      local_cache_path = cfg.localCachePath;
 
       # Pruning options
       prune_enabled = cfg.pruning.enable;
@@ -32,7 +33,7 @@ let
       prune_schedule = cfg.pruning.schedule;
 
       # Other options
-      signing_key_path = cfg.signingKeyFile;
+      signing_key_path = cfg.signingKeyPath;
       signing_key_name = cfg.signingKeyName;
       skip_signed_by_keys = cfg.skipSignedByKeys;
     };
@@ -57,6 +58,12 @@ in
       description = "The loft package to use.";
     };
 
+    debug = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Enable debug logging.";
+    };
+
     s3 = {
       bucket = mkOption { type = types.str; description = "S3 bucket name for the cache."; };
       region = mkOption { type = types.str; default = "us-east-1"; description = "S3 region for the cache."; };
@@ -71,7 +78,7 @@ in
       description = "Path to the local cache database file for the pusher service.";
     };
 
-    signingKeyFile = mkOption {
+    signingKeyPath = mkOption {
       type = with types; nullOr path;
       default = null;
       description = "Absolute path to the Nix signing key file.";
@@ -85,12 +92,12 @@ in
 
     uploadThreads = mkOption {
       type = types.int;
-      default = 4;
+      default = 12;
       description = "The number of concurrent uploads to perform.";
     };
     scanOnStartup = mkOption {
       type = types.bool;
-      default = false;
+      default = true;
       description = "Whether to perform an initial scan of the store on startup.";
     };
     populateCacheOnStartup = mkOption {
@@ -100,12 +107,13 @@ in
     };
     skipSignedByKeys = mkOption {
       type = types.listOf types.str;
-      default = [];
+      default = [ "cache.nixos.org-1" "nix-community.cachix.org-1" ];
+      example = literalExpression ''[ "cache.nixos.org-1" "nix-community.cachix.org-1" ]'';
       description = "List of public keys whose signed paths should be skipped for upload.";
     };
     useDiskForLargeNars = mkOption {
       type = types.bool;
-      default = false;
+      default = true;
       description = "Use disk for large NARs instead of memory.";
     };
     largeNarThresholdMb = mkOption {
@@ -177,7 +185,7 @@ in
               set -eu
               export AWS_ACCESS_KEY_ID=$(cat ${cfg.s3.accessKeyFile})
               export AWS_SECRET_ACCESS_KEY=$(cat ${cfg.s3.secretKeyFile})
-              exec ${loft-pkg}/bin/loft --config ${loftToml}
+              exec ${loft-pkg}/bin/loft --config ${loftToml} ${optionalString cfg.debug "--debug"}
             '';
           in
           "${wrapper}";
