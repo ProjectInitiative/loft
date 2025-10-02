@@ -7,8 +7,23 @@
     crane.url = "github:ipetkov/crane";
     attic-flake.url = "github:zhaofengli/attic";
   };
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, attic-flake }@inputs:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, attic-flake, ... }@inputs:
+  {
+    # The module is now a list containing an inline overlay module and the main module.
+    nixosModules.loft = [
+      # 1. This small, anonymous module adds the overlay to the user's system.
+      ({ pkgs, ... }: {
+        nixpkgs.overlays = [ self.overlays.default ];
+      })
+      # 2. This is your main configuration module from the file above.
+      (import ./nixos/module.nix)
+    ];
+    # Expose the overlay to make the package easily available
+    overlays.default = final: prev: {
+      loft = self.packages.${prev.system}.default;
+      cache-test = self.packages.${prev.system}.cache-test;
+    };
+  } // (flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
@@ -127,20 +142,6 @@
         '';
       in
       {
-        # The module is now a list containing an inline overlay module and the main module.
-        nixosModules.loft = [
-          # 1. This small, anonymous module adds the overlay to the user's system.
-          ({ pkgs, ... }: {
-            nixpkgs.overlays = [ self.overlays.default ];
-          })
-          # 2. This is your main configuration module from the file above.
-          (import ./nixos/module.nix)
-        ];
-        # Expose the overlay to make the package easily available
-        overlays.default = final: prev: {
-          loft = self.packages.${prev.system}.default;
-          cache-test = cache-test;
-        };
         packages = {
           default = loft;
           cache-test = cache-test;
@@ -269,5 +270,6 @@ EOF
         apps.cache-test = flake-utils.lib.mkApp {
           drv = cache-test;
         };
-      });
+      }
+    ));
 }
