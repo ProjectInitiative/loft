@@ -39,11 +39,14 @@ let
     };
   };
 
+  # Helper to remove nulls, as TOML doesn't support them
+  removeNulls = lib.filterAttrsRecursive (n: v: v != null);
+
   # Merge the base configuration with any user-provided extraConfig
   finalConfig = lib.recursiveUpdate baseConfig cfg.extraConfig;
 
-  # Generate the final loft.toml content
-  loftToml = tomlFormat.generate "loft.toml" finalConfig;
+  # Generate the final loft.toml content, stripping nulls
+  loftToml = tomlFormat.generate "loft.toml" (removeNulls finalConfig);
 
 in
 {
