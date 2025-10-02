@@ -197,6 +197,7 @@ in
 
         # Hardening options
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
+        BindReadOnlyPaths = [ "/nix/var/nix/db" "/nix/store" ];
         DevicePolicy = "closed";
         LockPersonality = true;
         NoNewPrivileges = true;
