@@ -195,29 +195,32 @@ in
 
         path = [ pkgs.nix ];
 
-        # Hardening options
-        CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
-        BindReadOnlyPaths = [ "/nix/var/nix/db" "/nix/store" ];
-        DevicePolicy = "closed";
-        LockPersonality = true;
-        NoNewPrivileges = true;
-        PrivateDevices = true;
-        PrivateTmp = true;
-        ProtectClock = true;
-        ProtectControlGroups = true;
-        ProtectHome = true;
-        ProtectHostname = true;
-        ProtectKernelLogs = true;
-        ProtectKernelModules = true;
-        ProtectKernelTunables = true;
-        ProtectSystem = "strict";
-        StateDirectory = "loft";
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        SystemCallArchitectures = "native";
-        SystemCallFilter = "@system-service";
-        UMask = "0077";
+        # Hardening options (temporarily disabled for debugging)
+        # CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
+        # BindReadOnlyPaths = [ "/nix/var/nix/db" "/nix/store" ];
+        # DevicePolicy = "closed";
+        # LockPersonality = true;
+        # NoNewPrivileges = true;
+        # PrivateDevices = true;
+        # PrivateTmp = true;
+        # ProtectClock = true;
+        # ProtectControlGroups = true;
+        # ProtectHome = true;
+        # ProtectHostname = true;
+        # ProtectKernelLogs = true;
+        # ProtectKernelModules = true;
+        # ProtectKernelTunables = true;
+        # ProtectSystem = "strict";
+        # StateDirectory = "loft";
+        # RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
+        # RestrictNamespaces = true;
+        # RestrictRealtime = true;
+        # SystemCallArchitectures = "native";
+        # SystemCallFilter = "@system-service";
+        # UMask = "0077";
+
+        # Create state directory manually since StateDirectory is disabled
+        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /var/lib/loft";
       };
     };
   };
