@@ -182,13 +182,16 @@ in
               #!${pkgs.runtimeShell}
               set -eu
               echo "--- Debugging loft service ---"
-              echo "PATH is: $PATH"
-              echo "which nix:"
-              which nix
+              echo "Initial PATH is: $PATH"
+              echo "which nix (before PATH modification):"
+              ${pkgs.which}/bin/which nix || echo "nix not in initial PATH"
+              export PATH=${pkgs.nix}/bin:$PATH
+              echo "Modified PATH is: $PATH"
+              echo "which nix (after PATH modification):"
+              ${pkgs.which}/bin/which nix || echo "nix not in modified PATH, this should not happen"
               echo "--- End Debugging ---"
               export AWS_ACCESS_KEY_ID=$(cat ${cfg.s3.accessKeyFile})
               export AWS_SECRET_ACCESS_KEY=$(cat ${cfg.s3.secretKeyFile})
-              export PATH=${pkgs.nix}/bin:$PATH
               exec ${loft-pkg}/bin/loft --config ${loftToml} ${optionalString cfg.debug "--debug"}
             '';
           in
