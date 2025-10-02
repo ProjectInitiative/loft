@@ -181,8 +181,14 @@ in
             wrapper = pkgs.writeShellScript "loft-wrapper" ''
               #!${pkgs.runtimeShell}
               set -eu
+              echo "--- Debugging loft service ---"
+              echo "PATH is: $PATH"
+              echo "which nix:"
+              which nix
+              echo "--- End Debugging ---"
               export AWS_ACCESS_KEY_ID=$(cat ${cfg.s3.accessKeyFile})
               export AWS_SECRET_ACCESS_KEY=$(cat ${cfg.s3.secretKeyFile})
+              export PATH=${pkgs.nix}/bin:$PATH
               exec ${loft-pkg}/bin/loft --config ${loftToml} ${optionalString cfg.debug "--debug"}
             '';
           in
