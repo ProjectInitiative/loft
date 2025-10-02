@@ -166,11 +166,6 @@ in
 
   ###### CONFIGURATION ######
   config = mkIf cfg.enable {
-    # Create the state directory for the cache database
-    systemd.tmpfiles.rules = [
-      "d ${builtins.dirOf cfg.localCachePath} 0750 root root -"
-    ];
-
     # Configure the systemd service for the pusher
     systemd.services.loft = {
       description = "Loft S3 Binary Cache Uploader";
@@ -213,7 +208,7 @@ in
         ProtectKernelModules = true;
         ProtectKernelTunables = true;
         ProtectSystem = "strict";
-        ReadWritePaths = [ (builtins.dirOf cfg.localCachePath) ];
+        StateDirectory = "loft";
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
         RestrictNamespaces = true;
         RestrictRealtime = true;

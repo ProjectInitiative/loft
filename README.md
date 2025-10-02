@@ -118,6 +118,12 @@ In your `configuration.nix` (or a related file), you can now enable and configur
 }
 ```
 
+### 3. Important Notes on Configuration
+
+When using the NixOS module, please be aware of the following:
+
+*   **`localCachePath` Location:** Due to the security sandboxing of the systemd service, the `localCachePath` must be located within the `/var/lib/loft` directory. The service does not have permission to write to other locations on the filesystem. The default path is `/var/lib/loft/cache.db`, which is the recommended setting.
+
 ## Configuration
 
 Loft is configured via a `loft.toml` file. The NixOS module generates this file for you. For other systems, you may need to create it manually.
