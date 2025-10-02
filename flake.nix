@@ -9,15 +9,17 @@
   };
   outputs = { self, nixpkgs, flake-utils, rust-overlay, crane, attic-flake, ... }@inputs:
   {
-    # The module is now a list containing an inline overlay module and the main module.
-    nixosModules.loft = [
-      # 1. This small, anonymous module adds the overlay to the user's system.
-      ({ pkgs, ... }: {
-        nixpkgs.overlays = [ self.overlays.default ];
-      })
-      # 2. This is your main configuration module from the file above.
-      (import ./nixos/module.nix)
-    ];
+    nixosModules.loft = {
+      # The flake now exposes a single module that internally imports the two parts.
+      imports = [
+        # 1. This small, anonymous module adds the overlay to the user's system.
+        ({ pkgs, ... }: {
+          nixpkgs.overlays = [ self.overlays.default ];
+        })
+        # 2. This is your main configuration module from the file above.
+        (import ./nixos/module.nix)
+      ];
+    };
     # Expose the overlay to make the package easily available
     overlays.default = final: prev: {
       loft = self.packages.${prev.system}.default;
