@@ -211,7 +211,7 @@ in
         ProtectKernelTunables = true;
         ProtectSystem = "strict";
         StateDirectory = "loft";
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
         RestrictNamespaces = true;
         RestrictRealtime = true;
         SystemCallArchitectures = "native";
