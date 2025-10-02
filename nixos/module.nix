@@ -193,6 +193,8 @@ in
         User = "root"; # Required to read /nix/store
         Group = "root";
 
+        path = [ pkgs.nix ];
+
         # Hardening options
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
         DevicePolicy = "closed";
