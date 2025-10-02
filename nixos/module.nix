@@ -177,21 +177,13 @@ in
         Type = "simple";
         ExecStart =
           let
-            # A wrapper script to securely load S3 credentials into environment variables
+            # A wrapper script to securely load S3 credentials and set the PATH
             wrapper = pkgs.writeShellScript "loft-wrapper" ''
               #!${pkgs.runtimeShell}
               set -eu
-              echo "--- Debugging loft service ---"
-              echo "Initial PATH is: $PATH"
-              echo "which nix (before PATH modification):"
-              ${pkgs.which}/bin/which nix || echo "nix not in initial PATH"
-              export PATH=${pkgs.nix}/bin:$PATH
-              echo "Modified PATH is: $PATH"
-              echo "which nix (after PATH modification):"
-              ${pkgs.which}/bin/which nix || echo "nix not in modified PATH, this should not happen"
-              echo "--- End Debugging ---"
               export AWS_ACCESS_KEY_ID=$(cat ${cfg.s3.accessKeyFile})
               export AWS_SECRET_ACCESS_KEY=$(cat ${cfg.s3.secretKeyFile})
+              export PATH=${pkgs.nix}/bin:$PATH
               exec ${loft-pkg}/bin/loft --config ${loftToml} ${optionalString cfg.debug "--debug"}
             '';
           in
@@ -202,34 +194,29 @@ in
         User = "root"; # Required to read /nix/store
         Group = "root";
 
-        path = [ pkgs.nix ];
-
-        # Hardening options (temporarily disabled for debugging)
-        # CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
-        # BindReadOnlyPaths = [ "/nix/var/nix/db" "/nix/store" ];
-        # DevicePolicy = "closed";
-        # LockPersonality = true;
-        # NoNewPrivileges = true;
-        # PrivateDevices = true;
-        # PrivateTmp = true;
-        # ProtectClock = true;
-        # ProtectControlGroups = true;
-        # ProtectHome = true;
-        # ProtectHostname = true;
-        # ProtectKernelLogs = true;
-        # ProtectKernelModules = true;
-        # ProtectKernelTunables = true;
-        # ProtectSystem = "strict";
-        # StateDirectory = "loft";
-        # RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
-        # RestrictNamespaces = true;
-        # RestrictRealtime = true;
-        # SystemCallArchitectures = "native";
-        # SystemCallFilter = "@system-service";
-        # UMask = "0077";
-
-        # Create state directory manually since StateDirectory is disabled
-        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /var/lib/loft";
+        # Hardening options
+        CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
+        BindReadOnlyPaths = [ "/nix/var/nix/db" "/nix/store" ];
+        DevicePolicy = "closed";
+        LockPersonality = true;
+        NoNewPrivileges = true;
+        PrivateDevices = true;
+        PrivateTmp = true;
+        ProtectClock = true;
+        ProtectControlGroups = true;
+        ProtectHome = true;
+        ProtectHostname = true;
+        ProtectKernelLogs = true;
+        ProtectKernelModules = true;
+        ProtectKernelTunables = true;
+        ProtectSystem = "strict";
+        StateDirectory = "loft";
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" ];
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = "@system-service";
+        UMask = "0077";
       };
     };
   };
