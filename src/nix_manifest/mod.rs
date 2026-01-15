@@ -298,6 +298,12 @@ impl NarInfo {
             }
         }
 
+        // ca
+        if let Some(ca) = &self.ca {
+            fingerprint.extend(b";");
+            fingerprint.extend(ca.as_bytes());
+        }
+
         fingerprint
     }
 

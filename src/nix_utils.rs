@@ -225,6 +225,7 @@ pub async fn upload_nar_for_path(
         return Err(anyhow!("Path {} not found in nix store", path.display()));
     }
 
+    let ca = path_info_json["ca"].as_str().map(|s| s.to_string());
     let deriver = path_info_json["deriver"].as_str().map(|s| s.to_string());
     let nar_hash_sri = path_info_json["narHash"].as_str().unwrap();
     let nar_size = path_info_json["narSize"].as_u64().unwrap();
@@ -402,6 +403,10 @@ pub async fn upload_nar_for_path(
         nar_info_content_base.push_str(&format!("Deriver: {}\n", deriver_basename));
     }
 
+    if let Some(ca_value) = ca {
+        nar_info_content_base.push_str(&format!("CA: {}\n", ca_value));
+    }
+
     let mut final_nar_info_content = nar_info_content_base.clone();
     let mut new_signature_key_name: Option<String> = None;
 
@@ -438,6 +443,9 @@ pub async fn upload_nar_for_path(
     // Add existing signatures, excluding the one we just added (if any)
     if !sigs.is_empty() {
         for sig in &sigs {
+            if sig.starts_with("ca:") {
+                continue;
+            }
             if let Some(existing_key_name) = sig.split_once(':').map(|(key, _)| key) {
                 if let Some(new_key) = &new_signature_key_name {
                     if existing_key_name == new_key {
