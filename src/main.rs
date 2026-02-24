@@ -218,17 +218,8 @@ async fn main() -> Result<()> {
 
 /// Parses a duration string (e.g., "1h", "24h", "7d") into a tokio::time::Duration.
 fn parse_duration_string(s: &str) -> Result<tokio::time::Duration> {
-    let s = s.trim();
-    let (num_str, unit_str) = s.split_at(s.len() - 1);
-    let num: u64 = num_str.parse().context("Invalid duration number")?;
-
-    match unit_str {
-        "h" => Ok(tokio::time::Duration::from_secs(num * 3600)),
-        "d" => Ok(tokio::time::Duration::from_secs(num * 3600 * 24)),
-        "m" => Ok(tokio::time::Duration::from_secs(num * 60)),
-        "s" => Ok(tokio::time::Duration::from_secs(num)),
-        _ => Err(anyhow::anyhow!("Invalid duration unit: {}", unit_str)),
-    }
+    let duration = humantime::parse_duration(s.trim())?;
+    Ok(duration.into())
 }
 
 async fn populate_local_cache_from_s3(
@@ -257,4 +248,25 @@ async fn populate_local_cache_from_s3(
     info!("Local cache populated from S3.");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_string() {
+        assert_eq!(parse_duration_string("1s").unwrap(), tokio::time::Duration::from_secs(1));
+        assert_eq!(parse_duration_string("1m").unwrap(), tokio::time::Duration::from_secs(60));
+        assert_eq!(parse_duration_string("1h").unwrap(), tokio::time::Duration::from_secs(3600));
+        assert_eq!(parse_duration_string("1d").unwrap(), tokio::time::Duration::from_secs(86400));
+        assert_eq!(parse_duration_string(" 24h ").unwrap(), tokio::time::Duration::from_secs(24 * 3600));
+        assert_eq!(parse_duration_string("1h 30m").unwrap(), tokio::time::Duration::from_secs(5400));
+    }
+
+    #[test]
+    fn test_parse_duration_string_invalid() {
+        assert!(parse_duration_string("invalid").is_err());
+        assert!(parse_duration_string("10").is_err());
+    }
 }
