@@ -36,10 +36,20 @@
           pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
         );
         # Build the application using the logic from crane.nix
-        loft = import ./crane.nix {
+        commonArgs = import ./crane.nix {
           inherit pkgs craneLib;
-          src = ./.;
+          src = craneLib.cleanCargoSource ./.;
           attic = attic-flake.packages.${system}.default;
+        };
+        loft = craneLib.buildPackage commonArgs;
+
+        # Define checks
+        checks = {
+          inherit loft;
+          clippy = craneLib.cargoClippy (commonArgs // {
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          });
+          fmt = craneLib.cargoFmt { inherit (commonArgs) src; };
         };
         
         # Cache testing script
@@ -148,6 +158,7 @@
           default = loft;
           cache-test = cache-test;
         };
+        inherit checks;
         devShells = {
           default = craneLib.devShell {
             inputsFrom = [ attic-flake.devShells.${system}.default ];
