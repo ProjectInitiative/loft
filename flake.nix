@@ -41,6 +41,15 @@
           src = ./.;
           attic = attic-flake.packages.${system}.default;
         };
+
+        # New pkgs for tests
+        pkgsForTest = import nixpkgs {
+          inherit system;
+          overlays = [
+            (import rust-overlay)
+            (final: prev: { loft = loft; })
+          ];
+        };
         
         # Cache testing script
         cache-test = pkgs.writeShellScriptBin "cache-test" ''
@@ -147,6 +156,9 @@
         packages = {
           default = loft;
           cache-test = cache-test;
+        };
+        checks = {
+          integration = pkgsForTest.nixosTest (import ./nixos/tests/integration.nix);
         };
         devShells = {
           default = craneLib.devShell {
