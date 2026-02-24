@@ -25,13 +25,13 @@ use attic::nix_store::NixStore;
 
 /// Scans the Nix store for existing paths and uploads them.
 pub async fn scan_and_process_existing_paths(
+    nix_store: Arc<NixStore>,
     uploader: Arc<S3Uploader>,
     local_cache: Arc<LocalCache>,
     config: &Config,
     force_scan: bool,
 ) -> Result<()> {
     info!("Starting scan of existing store paths...");
-    let nix_store = NixStore::connect()?;
 
     // 1. Gather paths that are not signed by skipped keys
     let keys_to_skip = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
@@ -41,7 +41,7 @@ pub async fn scan_and_process_existing_paths(
 
     // 2. Get the closure of the filtered paths
     let all_closure_paths: HashSet<String> =
-        match nix::get_store_paths_closure(filtered_paths_vec).await {
+        match nix::get_store_paths_closure(&nix_store, filtered_paths_vec).await {
             Ok(paths) => paths.into_iter().collect(),
             Err(e) => {
                 error!("Failed to get closures: {:?}", e);
@@ -81,6 +81,7 @@ pub async fn scan_and_process_existing_paths(
         let local_cache_clone = local_cache.clone();
         let config_clone = config.clone();
         let semaphore_clone = semaphore.clone();
+        let nix_store_clone = nix_store.clone();
         tasks.push(tokio::spawn(async move {
             let permit = semaphore_clone.acquire_owned().await.unwrap();
             let (tx, rx) = oneshot::channel();
@@ -88,6 +89,7 @@ pub async fn scan_and_process_existing_paths(
             let p = Path::new(&path_str).to_path_buf();
             let uploader_clone_block = uploader_clone.clone();
             let config_clone_block = config_clone.clone();
+            let nix_store_block = nix_store_clone.clone();
 
             tokio::task::spawn_blocking(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -95,15 +97,20 @@ pub async fn scan_and_process_existing_paths(
                     .build()
                     .unwrap();
                 let result = rt.block_on(async {
-                    nix::upload_nar_for_path(uploader_clone_block, &p, &config_clone_block).await
+                    nix::upload_nar_for_path(
+                        &nix_store_block,
+                        uploader_clone_block,
+                        &p,
+                        &config_clone_block,
+                    )
+                    .await
                 });
                 let _ = tx.send(result);
             });
 
             match rx.await {
                 Ok(Ok(_)) => {
-                    let store_path = NixStore::connect()
-                        .unwrap()
+                    let store_path = nix_store_clone
                         .parse_store_path(Path::new(&path_str))
                         .unwrap();
                     let path_hash_obj = store_path.to_hash();
@@ -132,12 +139,12 @@ pub async fn scan_and_process_existing_paths(
 
 /// Watches the Nix store and uploads new paths.
 pub async fn watch_store(
+    nix_store: Arc<NixStore>,
     uploader: Arc<S3Uploader>,
     local_cache: Arc<LocalCache>,
     config: &Config,
     force_scan: bool,
 ) -> Result<()> {
-    let nix_store = NixStore::connect()?;
     let (tx, mut rx) = mpsc::channel(100);
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
 
@@ -168,9 +175,11 @@ pub async fn watch_store(
         let local_cache_clone = local_cache.clone();
         let semaphore_clone = semaphore.clone();
         let config_for_task = config.clone(); // Clone config for the spawned task
+        let nix_store_clone = nix_store.clone();
         tokio::spawn(async move {
             let permit = semaphore_clone.acquire_owned().await.unwrap();
             if let Err(e) = process_path(
+                nix_store_clone,
                 uploader_clone,
                 local_cache_clone,
                 &path,
@@ -190,6 +199,7 @@ pub async fn watch_store(
 
 /// Processes a single store path for upload.
 pub async fn process_path(
+    nix_store: Arc<NixStore>,
     uploader: Arc<S3Uploader>,
     local_cache: Arc<LocalCache>,
     path: &Path,
@@ -209,7 +219,7 @@ pub async fn process_path(
     }
 
     // 2. Get closure
-    let closure = nix::get_store_path_closure(&path_str).await?;
+    let closure = nix::get_store_path_closure(&nix_store, &path_str).await?;
 
     // 3. Get signatures for the closure and filter again
     let closure_signatures = nix::get_path_signatures(closure.into_iter().collect()).await?;
@@ -222,7 +232,6 @@ pub async fn process_path(
     );
 
     // 4. Check caches
-    let nix_store = NixStore::connect()?;
     let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
     let result = checker
         .check_paths(&nix_store, filtered_closure_vec, force_scan)
@@ -238,23 +247,27 @@ pub async fn process_path(
         let uploader_clone_block = uploader_clone.clone();
         let config_clone_block = config_clone.clone();
 
+        let nix_store_block = nix_store.clone();
         tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
             let result = rt.block_on(async {
-                nix::upload_nar_for_path(uploader_clone_block, &p, &config_clone_block).await
+                nix::upload_nar_for_path(
+                    &nix_store_block,
+                    uploader_clone_block,
+                    &p,
+                    &config_clone_block,
+                )
+                .await
             });
             let _ = tx.send(result);
         });
 
         match rx.await {
             Ok(Ok(_)) => {
-                let store_path = NixStore::connect()
-                    .unwrap()
-                    .parse_store_path(Path::new(&path_str))
-                    .unwrap();
+                let store_path = nix_store.parse_store_path(Path::new(&path_str)).unwrap();
                 let path_hash_obj = store_path.to_hash();
                 let path_hash = path_hash_obj.as_str();
                 if let Err(e) = local_cache_clone.add_path_hash(path_hash) {

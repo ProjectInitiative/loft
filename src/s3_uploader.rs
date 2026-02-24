@@ -19,7 +19,6 @@ use tokio::io::AsyncReadExt;
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
 
-
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
 
 /// A client for uploading files to an S3 bucket.
@@ -71,6 +70,7 @@ impl S3Uploader {
     /// Checks if a list of store paths already exist in the cache.
     pub async fn check_paths_exist(
         &self,
+        nix_store: &NixStore,
         store_paths: &[String],
         max_concurrency: usize,
     ) -> Result<(Vec<String>, Vec<String>)> {
@@ -82,13 +82,14 @@ impl S3Uploader {
         let results = futures::stream::iter(store_paths.iter().cloned().map(|path_str| {
             let client = self.client.clone();
             let bucket = self.bucket.clone();
-            let nix_store = NixStore::connect().unwrap();
             let semaphore = semaphore.clone();
+
+            let store_path = nix_store.parse_store_path(Path::new(&path_str));
 
             async move {
                 let _permit = semaphore.acquire().await.expect("semaphore closed");
 
-                let store_path = match nix_store.parse_store_path(Path::new(&path_str)) {
+                let store_path = match store_path {
                     Ok(sp) => sp,
                     Err(e) => {
                         debug!("Failed to parse store path '{}': {}", path_str, e);
@@ -180,8 +181,6 @@ impl S3Uploader {
 
         Ok(all_keys)
     }
-
-    
 
     /// Uploads a file to S3, using multipart upload for large files.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {

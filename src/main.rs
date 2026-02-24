@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use loft::{config, local_cache, nix_store_watcher, pruner, s3_uploader};
 
+use attic::nix_store::NixStore;
 use config::Config;
 use local_cache::LocalCache;
 use nix_store_watcher::process_path; // Import process_path
@@ -112,6 +113,10 @@ async fn main() -> Result<()> {
         Arc::new(s3_uploader::S3Uploader::new(&config.s3).await?);
     info!("S3 uploader initialized for bucket '{}'.", config.s3.bucket);
 
+    // Initialize the Nix store connection.
+    let nix_store = Arc::new(NixStore::connect()?);
+    info!("Connected to the Nix store.");
+
     // Upload nix-cache-info file.
     uploader.upload_nix_cache_info(&config).await?;
 
@@ -125,6 +130,7 @@ async fn main() -> Result<()> {
         for path in paths_to_upload {
             info!("Processing manual upload path: {}", path.display());
             if let Err(e) = process_path(
+                nix_store.clone(),
                 uploader_clone.clone(),
                 local_cache_clone.clone(),
                 &path,
@@ -166,6 +172,7 @@ async fn main() -> Result<()> {
         // Scan existing paths and upload them.
         info!("Scanning existing store paths...");
         nix_store_watcher::scan_and_process_existing_paths(
+            nix_store.clone(),
             uploader.clone(),
             local_cache.clone(),
             &config,
@@ -180,6 +187,7 @@ async fn main() -> Result<()> {
     // Start watching the Nix store for new paths.
     info!("Watching for new store paths...");
     nix_store_watcher::watch_store(
+        nix_store.clone(),
         uploader.clone(),
         local_cache.clone(),
         &config,

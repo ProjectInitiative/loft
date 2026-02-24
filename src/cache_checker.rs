@@ -108,7 +108,7 @@ impl CacheChecker {
         // 2. Remote cache check (pass concurrency from config)
         let (missing_remote, found_remote) = self
             .uploader
-            .check_paths_exist(&missing_paths, self.config.loft.upload_threads)
+            .check_paths_exist(nix_store, &missing_paths, self.config.loft.upload_threads)
             .await?;
         debug!("{} found on remote", found_remote.len());
 

@@ -144,8 +144,10 @@ pub async fn get_path_signatures(paths: Vec<String>) -> Result<HashMap<String, V
 }
 
 /// Gets the signature key name for a given store path, if it exists.
-pub async fn get_path_signature_key(store_path: &str) -> Result<Option<String>> {
-    let nix_store = NixStore::connect()?;
+pub async fn get_path_signature_key(
+    nix_store: &NixStore,
+    store_path: &str,
+) -> Result<Option<String>> {
     let store_path_obj = nix_store.parse_store_path(Path::new(store_path))?;
 
     let path_info = nix_store.query_path_info(store_path_obj).await?;
@@ -158,8 +160,10 @@ pub async fn get_path_signature_key(store_path: &str) -> Result<Option<String>> 
 }
 
 /// Gets the closure of a set of store paths.
-pub async fn get_store_paths_closure(store_paths: Vec<String>) -> Result<Vec<String>> {
-    let nix_store = NixStore::connect()?;
+pub async fn get_store_paths_closure(
+    nix_store: &NixStore,
+    store_paths: Vec<String>,
+) -> Result<Vec<String>> {
     let mut store_path_objs = Vec::new();
     for path_str in store_paths {
         store_path_objs.push(nix_store.parse_store_path(Path::new(&path_str))?);
@@ -181,8 +185,7 @@ pub fn get_narinfo_key(store_path: &attic::nix_store::StorePath) -> String {
 }
 
 /// Dumps a store path to NAR bytes in memory.
-pub async fn dump_nar_to_bytes(store_path: &Path) -> Result<Vec<u8>> {
-    let nix_store = NixStore::connect()?;
+pub async fn dump_nar_to_bytes(nix_store: &NixStore, store_path: &Path) -> Result<Vec<u8>> {
     let store_path_obj = nix_store.parse_store_path(store_path)?;
 
     let mut adapter = nix_store.nar_from_path(store_path_obj);
@@ -197,6 +200,7 @@ pub async fn dump_nar_to_bytes(store_path: &Path) -> Result<Vec<u8>> {
 
 /// Uploads the NAR and .narinfo for a given store path.
 pub async fn upload_nar_for_path(
+    nix_store: &NixStore,
     uploader: Arc<S3Uploader>,
     path: &Path,
     config: &Config,
@@ -255,7 +259,6 @@ pub async fn upload_nar_for_path(
         })
         .collect();
 
-    let nix_store = NixStore::connect()?;
     let store_path_obj = nix_store.parse_store_path(path)?;
 
     let use_disk = config.loft.use_disk_for_large_nars
@@ -321,7 +324,7 @@ pub async fn upload_nar_for_path(
 
         (compressed_bytes, nar_key)
     } else {
-        let nar_bytes = dump_nar_to_bytes(path).await?;
+        let nar_bytes = dump_nar_to_bytes(nix_store, path).await?;
         info!("Created NAR for '{}' in memory.", path.display());
 
         let config_clone = config.clone();
@@ -486,6 +489,6 @@ pub async fn upload_nar_for_path(
 }
 
 /// Gets the closure of a store path.
-pub async fn get_store_path_closure(store_path: &str) -> Result<Vec<String>> {
-    get_store_paths_closure(vec![store_path.to_string()]).await
+pub async fn get_store_path_closure(nix_store: &NixStore, store_path: &str) -> Result<Vec<String>> {
+    get_store_paths_closure(nix_store, vec![store_path.to_string()]).await
 }

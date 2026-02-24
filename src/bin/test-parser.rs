@@ -1,4 +1,5 @@
 use anyhow::Result;
+use attic::nix_store::NixStore;
 use loft::nix_utils as nix;
 use std::collections::HashSet;
 use tracing::{error, info, Level};
@@ -18,6 +19,8 @@ async fn main() -> Result<()> {
     // filter out the signatures to only ones we need.
     let filtered_paths = nix::filter_out_sig_keys(all_sigs_map, keys_to_skip.clone()).await?;
 
+    let nix_store = NixStore::connect()?;
+
     info!(
         "\nFound {} paths that are NOT signed by any of the specified keys.",
         filtered_paths.len(),
@@ -35,7 +38,7 @@ async fn main() -> Result<()> {
     let filtered_paths_vec: Vec<String> = filtered_paths.keys().cloned().collect();
 
     let all_closure_paths: HashSet<String> =
-        match nix::get_store_paths_closure(filtered_paths_vec).await {
+        match nix::get_store_paths_closure(&nix_store, filtered_paths_vec).await {
             Ok(paths) => paths.into_iter().collect(),
             Err(e) => {
                 error!("Failed to get closures: {:?}", e);
