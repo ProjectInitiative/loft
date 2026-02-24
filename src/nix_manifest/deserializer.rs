@@ -21,6 +21,15 @@ impl<'de> Deserializer<'de> {
     pub fn from_str(input: &'de str) -> Self {
         Deserializer { input }
     }
+
+    pub fn end(&mut self) -> Result<(), Error> {
+        self.consume_whitespace()?;
+        if self.input.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Unexpected("extra output"))
+        }
+    }
 }
 
 // from https://serde.rs/impl-deserializer.html

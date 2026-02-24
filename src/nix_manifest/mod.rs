@@ -18,8 +18,32 @@
 //!
 //! [1] <https://github.com/NixOS/nix/blob/d581129ef9ef5d7d65e676f6a7bfe36c82f6ea6e/src/libstore/nar-info.cc#L28>
 
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct Simple {
+        #[serde(rename = "Key")]
+        key: String,
+    }
+
+    #[test]
+    fn test_from_str_extra_output() {
+        let input = "Key: value\nEXTRA";
+        let result: Result<Simple> = from_str(input);
+        assert!(result.is_err(), "Should have failed due to extra data");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("extra output"), "Error should mention extra output, got: {}", err);
+    }
+
+    #[test]
+    fn test_from_str_trailing_whitespace() {
+        let input = "Key: value  \n  ";
+        let result: Result<Simple> = from_str(input);
+        assert!(result.is_ok(), "Should have succeeded with trailing whitespace: {:?}", result.err());
+    }
+}
 
 use std::fmt::Display;
 use std::os::unix::ffi::OsStrExt;
@@ -45,10 +69,14 @@ where
     T: for<'de> Deserialize<'de>,
 {
     let mut deserializer = Deserializer::from_str(s);
-    T::deserialize(&mut deserializer)
-        .map_err(|e| anyhow::anyhow!("Manifest deserialization error: {}", e))
+    let value = T::deserialize(&mut deserializer)
+        .map_err(|e| anyhow::anyhow!("Manifest deserialization error: {}", e))?;
 
-    // FIXME: Reject extra output??
+    deserializer
+        .end()
+        .map_err(|e| anyhow::anyhow!("Manifest deserialization error: {}", e))?;
+
+    Ok(value)
 }
 
 pub fn to_string<T>(value: &T) -> Result<String>
