@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info};
+use crate::cache_checker::LocalCacheStorage;
 
 // Table definitions
 const HASHES_TABLE: TableDefinition<&str, &str> = TableDefinition::new("hashes");
@@ -320,6 +321,67 @@ impl LocalCache {
     }
 }
 
+impl LocalCacheStorage for LocalCache {
+    fn find_existing_hashes(&self, hashes: &[String]) -> Result<HashSet<String>> {
+        self.find_existing_hashes(hashes)
+    }
+
+    fn add_many_path_hashes(&self, hashes: &[String]) -> Result<()> {
+        self.add_many_path_hashes(hashes)
+    }
+}
+
 // Thread safety is automatic due to Arc<Database> and redb's internal thread safety
 unsafe impl Send for LocalCache {}
 unsafe impl Sync for LocalCache {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_local_cache_ops() -> Result<()> {
+        let temp_file = NamedTempFile::new()?;
+        let path = temp_file.path();
+
+        // 1. Initialize
+        let cache = LocalCache::new(path)?;
+
+        // 2. Add path
+        let path_str = "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep";
+        let hash = "87gj1r21740364x1f5n3703dq5c08z83";
+        cache.add_path(path_str)?;
+
+        // 3. Check existence
+        assert!(cache.has_path(path_str)?);
+        assert!(cache.has_path_hash(hash)?);
+
+        // 4. Lookup
+        assert_eq!(cache.lookup_full_path(hash)?, Some(path_str.to_string()));
+
+        // 5. Remove
+        assert!(cache.remove_hash(hash)?);
+        assert!(!cache.has_path_hash(hash)?);
+
+        // 6. Clear
+        cache.add_path(path_str)?;
+        cache.clear()?;
+        assert!(!cache.has_path_hash(hash)?);
+        assert_eq!(cache.count()?, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_extract_hash() -> Result<()> {
+        let path = "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep";
+        let hash = LocalCache::extract_hash_from_path(path)?;
+        assert_eq!(hash, "87gj1r21740364x1f5n3703dq5c08z83");
+
+        let invalid_path = "/usr/bin/local";
+        assert!(LocalCache::extract_hash_from_path(invalid_path).is_err());
+
+        Ok(())
+    }
+}

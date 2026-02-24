@@ -489,3 +489,44 @@ pub async fn upload_nar_for_path(
 pub async fn get_store_path_closure(store_path: &str) -> Result<Vec<String>> {
     get_store_paths_closure(vec![store_path.to_string()]).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_path_signatures() -> Result<()> {
+        let json_output = r#"{
+            "/nix/store/path1": {
+                "signatures": [
+                    "cache.nixos.org-1:sig1",
+                    "ca:hash"
+                ]
+            },
+            "/nix/store/path2": {
+                "signatures": [
+                    "other-key:sig2"
+                ]
+            }
+        }"#;
+
+        let result = parse_path_signatures_from_json(json_output)?;
+
+        assert_eq!(result.len(), 2);
+
+        let sigs1 = result.get("/nix/store/path1").unwrap();
+        assert_eq!(sigs1.len(), 2);
+
+        let has_crypto = sigs1.iter().any(|s| matches!(s, Signature::Crypto { key_name, signature } if key_name == "cache.nixos.org-1" && signature == "sig1"));
+        let has_ca = sigs1.iter().any(|s| matches!(s, Signature::ContentAddressed { full_info } if full_info == "ca:hash"));
+
+        assert!(has_crypto);
+        assert!(has_ca);
+
+        let sigs2 = result.get("/nix/store/path2").unwrap();
+        assert_eq!(sigs2.len(), 1);
+        assert!(matches!(&sigs2[0], Signature::Crypto { key_name, signature } if key_name == "other-key" && signature == "sig2"));
+
+        Ok(())
+    }
+}
