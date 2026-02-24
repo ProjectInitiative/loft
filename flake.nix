@@ -27,7 +27,7 @@
     };
   } // (flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
+        overlays = [ (import rust-overlay) self.overlays.default ];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
@@ -271,6 +271,10 @@ EOF
         };
         apps.cache-test = flake-utils.lib.mkApp {
           drv = cache-test;
+        };
+
+        checks = {
+          integration = pkgs.nixosTest (import ./nixos/tests/integration.nix);
         };
       }
     ));
