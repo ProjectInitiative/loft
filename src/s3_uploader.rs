@@ -159,7 +159,8 @@ impl S3Uploader {
                 for object in contents {
                     if let Some(key) = object.key {
                         if key.ends_with(".narinfo") {
-                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:") {
+                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:")
+                            {
                                 stripped.to_string()
                             } else {
                                 key
