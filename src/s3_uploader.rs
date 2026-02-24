@@ -19,7 +19,6 @@ use tokio::io::AsyncReadExt;
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
 
-
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
 
 /// A client for uploading files to an S3 bucket.
@@ -180,8 +179,6 @@ impl S3Uploader {
 
         Ok(all_keys)
     }
-
-    
 
     /// Uploads a file to S3, using multipart upload for large files.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {
