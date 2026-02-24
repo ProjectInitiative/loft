@@ -41,17 +41,34 @@
           src = craneLib.cleanCargoSource ./.;
           attic = attic-flake.packages.${system}.default;
         };
-        loft = craneLib.buildPackage commonArgs;
+
+        # Build *just* the cargo dependencies, so we can reuse
+        # all of that work (e.g. via cachix) when running in CI
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        # Build the actual crate itself, reusing the dependency
+        # artifacts from above.
+        loft = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+        });
 
         # Define checks
         checks = {
           inherit loft;
+
+          # Run clippy (and deny all warnings) on the crate source,
+          # again, reusing the dependency artifacts from above.
+          # Note that this is done as a separate derivation so that
+          # we can distinguish between dependency builds and source builds.
           clippy = craneLib.cargoClippy (commonArgs // {
+            inherit cargoArtifacts;
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
           });
+
+          # Check formatting
           fmt = craneLib.cargoFmt { inherit (commonArgs) src; };
         };
-        
+
         # Cache testing script
         cache-test = pkgs.writeShellScriptBin "cache-test" ''
           #!/usr/bin/env bash
