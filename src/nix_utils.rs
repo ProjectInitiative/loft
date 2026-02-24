@@ -122,7 +122,7 @@ pub async fn get_path_signatures(paths: Vec<String>) -> Result<HashMap<String, V
     );
 
     let mut cmd = Command::new("nix");
-    cmd.arg("path-info").arg("--sigs").arg("--json");
+    cmd.arg("path-info").arg("--sigs").arg("--json").arg("--");
 
     // Add each path as a separate argument
     for path in &paths {
@@ -204,6 +204,7 @@ pub async fn upload_nar_for_path(
     let output = Command::new("nix")
         .arg("path-info")
         .arg("--json")
+        .arg("--")
         .arg(path)
         .output()
         .await?;
@@ -488,4 +489,50 @@ pub async fn upload_nar_for_path(
 /// Gets the closure of a store path.
 pub async fn get_store_path_closure(store_path: &str) -> Result<Vec<String>> {
     get_store_paths_closure(vec![store_path.to_string()]).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    static PATH_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[tokio::test]
+    async fn test_get_path_signatures_uses_double_dash() -> Result<()> {
+        let _guard = PATH_MUTEX.lock().unwrap();
+
+        let dir = tempdir()?;
+        let mock_nix = dir.path().join("nix");
+        let log_file = dir.path().join("nix_args.log");
+
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> \"{}\"\necho '{{}}'\n",
+            log_file.display()
+        );
+        fs::write(&mock_nix, script)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&mock_nix, fs::Permissions::from_mode(0o755))?;
+        }
+
+        let original_path = env::var_os("PATH").unwrap_or_default();
+        let mut paths = env::split_paths(&original_path).collect::<Vec<_>>();
+        paths.insert(0, dir.path().to_path_buf());
+        let new_path = env::join_paths(paths).unwrap();
+
+        env::set_var("PATH", new_path);
+        let _ = get_path_signatures(vec!["--fake-flag".to_string()]).await;
+        env::set_var("PATH", original_path);
+
+        let args = fs::read_to_string(&log_file)?;
+        assert!(args.contains("path-info --sigs --json -- --fake-flag"));
+
+        Ok(())
+    }
 }
