@@ -36,10 +36,34 @@
           pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
         );
         # Build the application using the logic from crane.nix
-        loft = import ./crane.nix {
+        loftArgs = import ./crane.nix {
           inherit pkgs craneLib;
-          src = ./.;
+          src = craneLib.cleanCargoSource (craneLib.path ./.);
           attic = attic-flake.packages.${system}.default;
+        };
+
+        cargoArtifacts = craneLib.buildDepsOnly loftArgs;
+
+        loft = craneLib.buildPackage (loftArgs // {
+          inherit cargoArtifacts;
+        });
+
+        loftClippy = craneLib.cargoClippy (loftArgs // {
+          inherit cargoArtifacts;
+          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+        });
+
+        loftNextest = craneLib.cargoTest (loftArgs // {
+          inherit cargoArtifacts;
+        });
+
+        # New pkgs for tests
+        pkgsForTest = import nixpkgs {
+          inherit system;
+          overlays = [
+            (import rust-overlay)
+            (final: prev: { loft = loft; })
+          ];
         };
         
         # Cache testing script
@@ -147,6 +171,11 @@
         packages = {
           default = loft;
           cache-test = cache-test;
+        };
+        checks = {
+          integration = pkgsForTest.nixosTest (import ./nixos/tests/integration.nix);
+          clippy = loftClippy;
+          unit-tests = loftNextest;
         };
         devShells = {
           default = craneLib.devShell {

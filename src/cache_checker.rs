@@ -1,6 +1,10 @@
 use anyhow::Result;
 use futures::future::BoxFuture;
-use std::{collections::{HashMap, HashSet}, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 use tracing::{debug, info};
 
 use attic::nix_store::NixStore;
@@ -9,6 +13,8 @@ use attic::nix_store::NixStore;
 pub trait LocalCacheStorage: Send + Sync {
     fn find_existing_hashes(&self, hashes: &[String]) -> Result<HashSet<String>>;
     fn add_many_path_hashes(&self, hashes: &[String]) -> Result<()>;
+    fn is_scan_complete(&self) -> Result<bool>;
+    fn set_scan_complete(&self) -> Result<()>;
 }
 
 /// Trait for remote cache storage operations.
@@ -18,6 +24,7 @@ pub trait RemoteCacheStorage: Send + Sync {
         store_paths: &'a [String],
         max_concurrency: usize,
     ) -> BoxFuture<'a, Result<(Vec<String>, Vec<String>)>>;
+    fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>>;
 }
 
 /// Trait for providing Nix path hashes.
@@ -34,17 +41,27 @@ impl NixHashProvider for NixStore {
         paths: &'a [String],
     ) -> BoxFuture<'a, Result<HashMap<String, String>>> {
         Box::pin(async move {
-            let mut map = HashMap::new();
+            let mut tasks = Vec::new();
             for p in paths {
-                let store_path = self.parse_store_path(Path::new(p))?;
-                let info = self.query_path_info(store_path).await?;
-                let hash = info
-                    .nar_hash
-                    .to_typed_base32()
-                    .strip_prefix("sha256:")
-                    .unwrap_or_default()
-                    .to_string();
-                map.insert(p.clone(), hash);
+                let p = p.clone();
+                tasks.push(async move {
+                    let store_path = self.parse_store_path(Path::new(&p))?;
+                    let info = self.query_path_info(store_path).await?;
+                    let hash = info
+                        .nar_hash
+                        .to_typed_base32()
+                        .strip_prefix("sha256:")
+                        .unwrap_or_default()
+                        .to_string();
+                    Ok::<_, anyhow::Error>((p, hash))
+                });
+            }
+
+            let results = futures::future::join_all(tasks).await;
+            let mut map = HashMap::new();
+            for res in results {
+                let (p, hash) = res?;
+                map.insert(p, hash);
             }
             Ok(map)
         })
@@ -82,7 +99,7 @@ impl CacheChecker {
     pub async fn check_paths(
         &self,
         nix_provider: &dyn NixHashProvider,
-        paths: Vec<String>,
+        paths: &[String],
         force_scan: bool,
     ) -> Result<CacheCheckResult> {
         if paths.is_empty() {
@@ -92,7 +109,33 @@ impl CacheChecker {
             });
         }
 
-        let hashes_map = nix_provider.get_hashes(&paths).await?;
+        // Bulk Warmup Logic
+        if !force_scan && !self.local_cache.is_scan_complete().unwrap_or(false) {
+            info!("Local cache scan is not complete. Fetching all remote hashes to warm up local cache...");
+            match self.uploader.list_all_hashes().await {
+                Ok(remote_hashes) => {
+                    info!(
+                        "Found {} remote hashes during warmup. Populating local cache...",
+                        remote_hashes.len()
+                    );
+                    if let Err(e) = self.local_cache.add_many_path_hashes(&remote_hashes) {
+                        tracing::warn!(
+                            "Failed to add remote hashes to local cache during warmup: {}",
+                            e
+                        );
+                    } else if let Err(e) = self.local_cache.set_scan_complete() {
+                        tracing::warn!("Failed to mark scan as complete: {}", e);
+                    } else {
+                        info!("Warmup complete.");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to list remote hashes during warmup: {}", e);
+                }
+            }
+        }
+
+        let hashes_map = nix_provider.get_hashes(paths).await?;
         let hashes: Vec<String> = paths
             .iter()
             .map(|p| hashes_map.get(p).cloned().unwrap_or_default())
@@ -100,17 +143,18 @@ impl CacheChecker {
 
         // 1. Local cache check
         let missing_paths: Vec<String> = if force_scan {
-            paths.clone()
+            paths.to_vec()
         } else {
             let existing = self.local_cache.find_existing_hashes(&hashes)?;
             info!("Local cache already has {} entries", existing.len());
 
             paths
-                .into_iter()
-                .filter(|p| {
+                .iter()
+                .filter(|&p| {
                     let h = hashes_map.get(p).unwrap();
                     !existing.contains(h)
                 })
+                .cloned()
                 .collect()
         };
 
@@ -186,6 +230,14 @@ mod tests {
             }
             Ok(())
         }
+
+        fn is_scan_complete(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn set_scan_complete(&self) -> Result<()> {
+            Ok(())
+        }
     }
 
     struct MockRemoteCache {
@@ -218,6 +270,18 @@ mod tests {
                     }
                 }
                 Ok((missing, found))
+            })
+        }
+
+        fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
+            Box::pin(async move {
+                Ok(self
+                    .existing_paths
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect())
             })
         }
     }
@@ -302,7 +366,7 @@ mod tests {
 
         let paths = vec![path1.to_string(), path2.to_string(), path3.to_string()];
 
-        let result = checker.check_paths(&nix_provider, paths, false).await?;
+        let result = checker.check_paths(&nix_provider, &paths, false).await?;
 
         // path2 is locally cached -> ignored
         // path3 is remotely cached -> should be added to local cache, not uploaded
@@ -314,7 +378,7 @@ mod tests {
         assert_eq!(result.to_upload.len(), 1);
 
         // Verify local cache updated for path3
-        let local_hashes = local_cache.find_existing_hashes(&vec![hash3.to_string()])?;
+        let local_hashes = local_cache.find_existing_hashes(&[hash3.to_string()])?;
         assert!(local_hashes.contains(hash3));
 
         Ok(())
@@ -336,15 +400,34 @@ mod tests {
         let nix_provider = MockNixHashProvider::new(hashes);
         let config = crate::config::Config {
             s3: crate::config::S3Config {
-                endpoint: "".to_string(), region: "".to_string(), bucket: "".to_string(), access_key: None, secret_key: None,
+                endpoint: "".to_string(),
+                region: "".to_string(),
+                bucket: "".to_string(),
+                access_key: None,
+                secret_key: None,
             },
             loft: crate::config::LoftConfig {
-                local_cache_path: std::path::PathBuf::from(""), signing_key_path: None, signing_key_name: None, upload_threads: 1, skip_signed_by_keys: None, large_nar_threshold_mb: 0, use_disk_for_large_nars: false, compression: crate::config::Compression::Zstd, prune_enabled: false, prune_schedule: None, prune_retention_days: 30, prune_max_size_gb: None, prune_target_percentage: Some(90), scan_on_startup: false, populate_cache_on_startup: false,
+                local_cache_path: std::path::PathBuf::from(""),
+                signing_key_path: None,
+                signing_key_name: None,
+                upload_threads: 1,
+                skip_signed_by_keys: None,
+                large_nar_threshold_mb: 0,
+                use_disk_for_large_nars: false,
+                compression: crate::config::Compression::Zstd,
+                prune_enabled: false,
+                prune_schedule: None,
+                prune_retention_days: 30,
+                prune_max_size_gb: None,
+                prune_target_percentage: Some(90),
+                scan_on_startup: false,
+                populate_cache_on_startup: false,
             },
         };
 
         let checker = CacheChecker::new(remote_cache, local_cache, config);
-        let result = checker.check_paths(&nix_provider, vec![path1.to_string()], false).await?;
+        let paths = vec![path1.to_string()];
+        let result = checker.check_paths(&nix_provider, &paths, false).await?;
 
         assert!(result.to_upload.is_empty());
         Ok(())
@@ -365,17 +448,36 @@ mod tests {
         let nix_provider = MockNixHashProvider::new(hashes);
         let config = crate::config::Config {
             s3: crate::config::S3Config {
-                endpoint: "".to_string(), region: "".to_string(), bucket: "".to_string(), access_key: None, secret_key: None,
+                endpoint: "".to_string(),
+                region: "".to_string(),
+                bucket: "".to_string(),
+                access_key: None,
+                secret_key: None,
             },
             loft: crate::config::LoftConfig {
-                local_cache_path: std::path::PathBuf::from(""), signing_key_path: None, signing_key_name: None, upload_threads: 1, skip_signed_by_keys: None, large_nar_threshold_mb: 0, use_disk_for_large_nars: false, compression: crate::config::Compression::Zstd, prune_enabled: false, prune_schedule: None, prune_retention_days: 30, prune_max_size_gb: None, prune_target_percentage: Some(90), scan_on_startup: false, populate_cache_on_startup: false,
+                local_cache_path: std::path::PathBuf::from(""),
+                signing_key_path: None,
+                signing_key_name: None,
+                upload_threads: 1,
+                skip_signed_by_keys: None,
+                large_nar_threshold_mb: 0,
+                use_disk_for_large_nars: false,
+                compression: crate::config::Compression::Zstd,
+                prune_enabled: false,
+                prune_schedule: None,
+                prune_retention_days: 30,
+                prune_max_size_gb: None,
+                prune_target_percentage: Some(90),
+                scan_on_startup: false,
+                populate_cache_on_startup: false,
             },
         };
 
         let checker = CacheChecker::new(remote_cache, local_cache, config);
 
         // ...using force_scan = true will cause it to query remote, see it's missing, and return it for upload.
-        let result = checker.check_paths(&nix_provider, vec![path1.to_string()], true).await?;
+        let paths = vec![path1.to_string()];
+        let result = checker.check_paths(&nix_provider, &paths, true).await?;
 
         assert_eq!(result.to_upload, vec![path1.to_string()]);
         Ok(())
