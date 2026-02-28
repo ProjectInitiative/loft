@@ -453,6 +453,12 @@ impl RemoteCacheStorage for S3Uploader {
             self.check_paths_exist(store_paths, max_concurrency).await
         })
     }
+
+    fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async move {
+            self.list_all_narinfo_keys().await
+        })
+    }
 }
 
 // Helper trait to convert aws_sdk_s3::types::DateTime to chrono::DateTime<Utc>

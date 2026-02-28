@@ -323,11 +323,19 @@ impl LocalCache {
 
 impl LocalCacheStorage for LocalCache {
     fn find_existing_hashes(&self, hashes: &[String]) -> Result<HashSet<String>> {
-        self.find_existing_hashes(hashes)
+        LocalCache::find_existing_hashes(self, hashes)
     }
 
     fn add_many_path_hashes(&self, hashes: &[String]) -> Result<()> {
-        self.add_many_path_hashes(hashes)
+        LocalCache::add_many_path_hashes(self, hashes)
+    }
+
+    fn is_scan_complete(&self) -> Result<bool> {
+        LocalCache::is_scan_complete(self)
+    }
+
+    fn set_scan_complete(&self) -> Result<()> {
+        LocalCache::set_scan_complete(self)
     }
 }
 

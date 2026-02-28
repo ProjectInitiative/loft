@@ -9,6 +9,8 @@ use attic::nix_store::NixStore;
 pub trait LocalCacheStorage: Send + Sync {
     fn find_existing_hashes(&self, hashes: &[String]) -> Result<HashSet<String>>;
     fn add_many_path_hashes(&self, hashes: &[String]) -> Result<()>;
+    fn is_scan_complete(&self) -> Result<bool>;
+    fn set_scan_complete(&self) -> Result<()>;
 }
 
 /// Trait for remote cache storage operations.
@@ -18,6 +20,7 @@ pub trait RemoteCacheStorage: Send + Sync {
         store_paths: &'a [String],
         max_concurrency: usize,
     ) -> BoxFuture<'a, Result<(Vec<String>, Vec<String>)>>;
+    fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>>;
 }
 
 /// Trait for providing Nix path hashes.
@@ -90,6 +93,26 @@ impl CacheChecker {
                 to_upload: vec![],
                 already_cached: vec![],
             });
+        }
+
+        // Bulk Warmup Logic
+        if !force_scan && !self.local_cache.is_scan_complete().unwrap_or(false) {
+            info!("Local cache scan is not complete. Fetching all remote hashes to warm up local cache...");
+            match self.uploader.list_all_hashes().await {
+                Ok(remote_hashes) => {
+                    info!("Found {} remote hashes during warmup. Populating local cache...", remote_hashes.len());
+                    if let Err(e) = self.local_cache.add_many_path_hashes(&remote_hashes) {
+                        tracing::warn!("Failed to add remote hashes to local cache during warmup: {}", e);
+                    } else if let Err(e) = self.local_cache.set_scan_complete() {
+                        tracing::warn!("Failed to mark scan as complete: {}", e);
+                    } else {
+                        info!("Warmup complete.");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to list remote hashes during warmup: {}", e);
+                }
+            }
         }
 
         let hashes_map = nix_provider.get_hashes(&paths).await?;
@@ -186,6 +209,14 @@ mod tests {
             }
             Ok(())
         }
+
+        fn is_scan_complete(&self) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn set_scan_complete(&self) -> Result<()> {
+            Ok(())
+        }
     }
 
     struct MockRemoteCache {
@@ -218,6 +249,12 @@ mod tests {
                     }
                 }
                 Ok((missing, found))
+            })
+        }
+
+        fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
+            Box::pin(async move {
+                Ok(self.existing_paths.lock().unwrap().iter().cloned().collect())
             })
         }
     }
