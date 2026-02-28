@@ -76,7 +76,7 @@ pub async fn scan_and_process_existing_paths(
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
     let mut tasks = Vec::new();
 
-    for (path_str, _path_info) in result.to_upload {
+    for path_str in result.to_upload {
         let uploader_clone = uploader.clone();
         let local_cache_clone = local_cache.clone();
         let config_clone = config.clone();
@@ -229,7 +229,7 @@ pub async fn process_path(
         .await?;
 
     // 5. Upload missing
-    for (path_str, _path_info) in result.to_upload {
+    for path_str in result.to_upload {
         let uploader_clone = uploader.clone();
         let local_cache_clone = local_cache.clone();
         let config_clone = config.clone();

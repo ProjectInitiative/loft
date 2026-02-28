@@ -18,6 +18,8 @@ use tokio::io::AsyncReadExt;
 
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
+use crate::cache_checker::RemoteCacheStorage;
+use futures::future::BoxFuture;
 
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
 
@@ -435,6 +437,18 @@ impl S3Uploader {
         }
         info!("Current bucket size: {} bytes", total_size);
         Ok(total_size)
+    }
+}
+
+impl RemoteCacheStorage for S3Uploader {
+    fn check_paths_exist<'a>(
+        &'a self,
+        store_paths: &'a [String],
+        max_concurrency: usize,
+    ) -> BoxFuture<'a, Result<(Vec<String>, Vec<String>)>> {
+        Box::pin(async move {
+            self.check_paths_exist(store_paths, max_concurrency).await
+        })
     }
 }
 
