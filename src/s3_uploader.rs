@@ -59,7 +59,9 @@ impl S3Uploader {
 
         let sdk_config = config_loader.load().await;
 
-        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config).build();
+        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
+            .force_path_style(true)
+            .build();
 
         let client = Client::from_conf(s3_config);
 

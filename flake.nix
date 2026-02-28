@@ -38,7 +38,7 @@
         # Build the application using the logic from crane.nix
         loft = import ./crane.nix {
           inherit pkgs craneLib;
-          src = ./.;
+          src = craneLib.cleanCargoSource (craneLib.path ./.);
           attic = attic-flake.packages.${system}.default;
         };
 
