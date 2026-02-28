@@ -520,14 +520,18 @@ mod tests {
         assert_eq!(sigs1.len(), 2);
 
         let has_crypto = sigs1.iter().any(|s| matches!(s, Signature::Crypto { key_name, signature } if key_name == "cache.nixos.org-1" && signature == "sig1"));
-        let has_ca = sigs1.iter().any(|s| matches!(s, Signature::ContentAddressed { full_info } if full_info == "ca:hash"));
+        let has_ca = sigs1.iter().any(
+            |s| matches!(s, Signature::ContentAddressed { full_info } if full_info == "ca:hash"),
+        );
 
         assert!(has_crypto);
         assert!(has_ca);
 
         let sigs2 = result.get("/nix/store/path2").unwrap();
         assert_eq!(sigs2.len(), 1);
-        assert!(matches!(&sigs2[0], Signature::Crypto { key_name, signature } if key_name == "other-key" && signature == "sig2"));
+        assert!(
+            matches!(&sigs2[0], Signature::Crypto { key_name, signature } if key_name == "other-key" && signature == "sig2")
+        );
 
         Ok(())
     }
@@ -539,15 +543,17 @@ mod tests {
         let mut map = HashMap::new();
 
         let path1 = "/nix/store/path1";
-        let sigs1 = vec![
-            Signature::Crypto { key_name: "skip-key".to_string(), signature: "sig".to_string() },
-        ];
+        let sigs1 = vec![Signature::Crypto {
+            key_name: "skip-key".to_string(),
+            signature: "sig".to_string(),
+        }];
         map.insert(path1.to_string(), sigs1);
 
         let path2 = "/nix/store/path2";
-        let sigs2 = vec![
-            Signature::Crypto { key_name: "keep-key".to_string(), signature: "sig".to_string() },
-        ];
+        let sigs2 = vec![Signature::Crypto {
+            key_name: "keep-key".to_string(),
+            signature: "sig".to_string(),
+        }];
         map.insert(path2.to_string(), sigs2);
 
         let keys_to_skip = vec!["skip-key".to_string()];
