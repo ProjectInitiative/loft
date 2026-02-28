@@ -235,24 +235,26 @@ async fn main() -> Result<()> {
         }
     }
 
+    let mut watcher_handle = watcher_handle;
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Received Ctrl-C, initiating graceful shutdown...");
             cancel_token.cancel();
-
-            info!("Waiting for watcher to finish...");
-            let _ = watcher_handle.await;
-
-            if let Some(handle) = pruner_handle {
-                info!("Waiting for pruner to finish...");
-                let _ = handle.await;
-            }
         }
-        res = watcher_handle => {
+        res = &mut watcher_handle => {
             if let Err(e) = res {
                 error!("Watcher handle error: {:?}", e);
             }
         }
+    }
+
+    info!("Waiting for watcher to finish...");
+    let _ = watcher_handle.await;
+
+    if let Some(handle) = pruner_handle {
+        info!("Waiting for pruner to finish...");
+        let _ = handle.await;
     }
 
     info!("Graceful shutdown complete.");

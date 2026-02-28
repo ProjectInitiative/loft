@@ -85,17 +85,27 @@ impl LocalCache {
         Ok(())
     }
 
-    /// Extracts the hash from a nix store path.
-    /// Example: "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep" -> "87gj1r21740364x1f5n3703dq5c08z83"
-    pub fn extract_hash_from_path(&self, path: &str) -> Result<String> {
-        let path = path
-            .strip_prefix(&self.store_dir)
-            .ok_or_else(|| anyhow!("Path does not start with {}: {}", self.store_dir, path))?;
+    /// Extracts the hash from a nix store path using the default store directory.
+    pub fn extract_hash_from_path(path: &str) -> Result<String> {
+        Self::extract_hash_from_path_with_store_dir(path, "/nix/store/")
+    }
 
-        let hash = path
+    /// Extracts the hash from a nix store path with a specific store directory.
+    pub fn extract_hash_from_path_with_store_dir(path: &str, store_dir: &str) -> Result<String> {
+        let store_dir_prefix = if !store_dir.ends_with('/') {
+            format!("{}/", store_dir)
+        } else {
+            store_dir.to_string()
+        };
+
+        let path_stripped = path
+            .strip_prefix(&store_dir_prefix)
+            .ok_or_else(|| anyhow!("Path does not start with {}: {}", store_dir_prefix, path))?;
+
+        let hash = path_stripped
             .split('-')
             .next()
-            .ok_or_else(|| anyhow!("Could not extract hash from path: {}", path))?;
+            .ok_or_else(|| anyhow!("Could not extract hash from path: {}", path_stripped))?;
 
         if hash.len() != 32 {
             return Err(anyhow!(
@@ -123,7 +133,7 @@ impl LocalCache {
 
     /// Adds a single path to the cache (stores both hash->existence and hash->full_path).
     pub fn add_path(&self, path: &str) -> Result<()> {
-        let hash = self.extract_hash_from_path(path)?;
+        let hash = Self::extract_hash_from_path_with_store_dir(path, &self.store_dir)?;
 
         let write_txn = self.db.begin_write()?;
         {
@@ -159,7 +169,7 @@ impl LocalCache {
 
     /// Checks if a path exists by extracting its hash.
     pub fn has_path(&self, path: &str) -> Result<bool> {
-        let hash = self.extract_hash_from_path(path)?;
+        let hash = Self::extract_hash_from_path_with_store_dir(path, &self.store_dir)?;
         self.has_path_hash(&hash)
     }
 
@@ -175,7 +185,7 @@ impl LocalCache {
             let mut paths_table = write_txn.open_table(PATHS_TABLE)?;
 
             for path in paths {
-                let hash = self.extract_hash_from_path(path)?;
+                let hash = Self::extract_hash_from_path_with_store_dir(path, &self.store_dir)?;
                 hashes_table.insert(hash.as_str(), "")?;
                 paths_table.insert(hash.as_str(), path.as_str())?;
             }
@@ -247,7 +257,7 @@ impl LocalCache {
         let table = read_txn.open_table(HASHES_TABLE)?;
 
         for path in paths {
-            let hash = self.extract_hash_from_path(path)?;
+            let hash = Self::extract_hash_from_path_with_store_dir(path, &self.store_dir)?;
             if table.get(hash.as_str())?.is_some() {
                 debug!("find_existing_paths: found existing path: {}", path);
                 existing_paths.insert(path.clone());
@@ -406,11 +416,11 @@ mod tests {
         let cache = LocalCache::new(path)?;
 
         let path_str = "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep";
-        let hash = cache.extract_hash_from_path(path_str)?;
+        let hash = LocalCache::extract_hash_from_path(path_str)?;
         assert_eq!(hash, "87gj1r21740364x1f5n3703dq5c08z83");
 
         let invalid_path = "/usr/bin/local";
-        assert!(cache.extract_hash_from_path(invalid_path).is_err());
+        assert!(LocalCache::extract_hash_from_path(invalid_path).is_err());
 
         Ok(())
     }

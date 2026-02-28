@@ -18,7 +18,6 @@ use tokio::io::AsyncReadExt;
 
 use crate::cache_checker::RemoteCacheStorage;
 use crate::config::S3Config;
-use attic::nix_store::NixStore;
 use futures::future::BoxFuture;
 
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
