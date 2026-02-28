@@ -1,6 +1,7 @@
 //! Manages a local redb cache of uploaded paths with full thread safety.
 use crate::cache_checker::LocalCacheStorage;
 use anyhow::{anyhow, Result};
+use attic::nix_store::NixStore;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashSet;
 use std::path::Path;
@@ -16,6 +17,7 @@ const METADATA_TABLE: TableDefinition<&str, &str> = TableDefinition::new("metada
 #[derive(Clone)]
 pub struct LocalCache {
     db: Arc<Database>,
+    store_dir: String,
 }
 
 impl LocalCache {
@@ -23,7 +25,19 @@ impl LocalCache {
     pub fn new(path: &Path) -> Result<Self> {
         let db = Database::create(path)?;
         info!("Opening database at {:?}", path);
-        let cache = LocalCache { db: Arc::new(db) };
+        let store_dir = match NixStore::connect() {
+            Ok(store) => store.store_dir().to_string_lossy().into_owned(),
+            Err(_) => "/nix/store".to_string(), // Fallback for tests or no nix
+        };
+        let store_dir_prefix = if !store_dir.ends_with('/') {
+            format!("{}/", store_dir)
+        } else {
+            store_dir
+        };
+        let cache = LocalCache {
+            db: Arc::new(db),
+            store_dir: store_dir_prefix,
+        };
         cache.initialize()?;
         Ok(cache)
     }
@@ -73,10 +87,10 @@ impl LocalCache {
 
     /// Extracts the hash from a nix store path.
     /// Example: "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep" -> "87gj1r21740364x1f5n3703dq5c08z83"
-    pub fn extract_hash_from_path(path: &str) -> Result<String> {
+    pub fn extract_hash_from_path(&self, path: &str) -> Result<String> {
         let path = path
-            .strip_prefix("/nix/store/")
-            .ok_or_else(|| anyhow!("Path does not start with /nix/store/: {}", path))?;
+            .strip_prefix(&self.store_dir)
+            .ok_or_else(|| anyhow!("Path does not start with {}: {}", self.store_dir, path))?;
 
         let hash = path
             .split('-')
@@ -109,7 +123,7 @@ impl LocalCache {
 
     /// Adds a single path to the cache (stores both hash->existence and hash->full_path).
     pub fn add_path(&self, path: &str) -> Result<()> {
-        let hash = Self::extract_hash_from_path(path)?;
+        let hash = self.extract_hash_from_path(path)?;
 
         let write_txn = self.db.begin_write()?;
         {
@@ -145,7 +159,7 @@ impl LocalCache {
 
     /// Checks if a path exists by extracting its hash.
     pub fn has_path(&self, path: &str) -> Result<bool> {
-        let hash = Self::extract_hash_from_path(path)?;
+        let hash = self.extract_hash_from_path(path)?;
         self.has_path_hash(&hash)
     }
 
@@ -161,7 +175,7 @@ impl LocalCache {
             let mut paths_table = write_txn.open_table(PATHS_TABLE)?;
 
             for path in paths {
-                let hash = Self::extract_hash_from_path(path)?;
+                let hash = self.extract_hash_from_path(path)?;
                 hashes_table.insert(hash.as_str(), "")?;
                 paths_table.insert(hash.as_str(), path.as_str())?;
             }
@@ -233,7 +247,7 @@ impl LocalCache {
         let table = read_txn.open_table(HASHES_TABLE)?;
 
         for path in paths {
-            let hash = Self::extract_hash_from_path(path)?;
+            let hash = self.extract_hash_from_path(path)?;
             if table.get(hash.as_str())?.is_some() {
                 debug!("find_existing_paths: found existing path: {}", path);
                 existing_paths.insert(path.clone());
@@ -387,12 +401,16 @@ mod tests {
     /// standard valid path strings, and errors on invalid formats.
     #[test]
     fn test_extract_hash() -> Result<()> {
-        let path = "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep";
-        let hash = LocalCache::extract_hash_from_path(path)?;
+        let temp_file = NamedTempFile::new()?;
+        let path = temp_file.path();
+        let cache = LocalCache::new(path)?;
+
+        let path_str = "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep";
+        let hash = cache.extract_hash_from_path(path_str)?;
         assert_eq!(hash, "87gj1r21740364x1f5n3703dq5c08z83");
 
         let invalid_path = "/usr/bin/local";
-        assert!(LocalCache::extract_hash_from_path(invalid_path).is_err());
+        assert!(cache.extract_hash_from_path(invalid_path).is_err());
 
         Ok(())
     }
