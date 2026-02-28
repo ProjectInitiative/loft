@@ -52,10 +52,6 @@ pub struct LoftConfig {
     /// Optional: List of public keys whose signed paths should be skipped for upload.
     /// If a path is signed by any of these keys, it will not be uploaded.
     pub skip_signed_by_keys: Option<Vec<String>>,
-    /// Optional: Use disk for large NARs instead of memory.
-    pub use_disk_for_large_nars: bool,
-    /// Optional: The threshold in MB for what is considered a large NAR.
-    pub large_nar_threshold_mb: u64,
     /// The compression algorithm to use.
     pub compression: Compression,
     /// Optional: Enable pruning of old objects from the S3 cache.
@@ -81,8 +77,6 @@ impl Default for LoftConfig {
             signing_key_path: None,
             signing_key_name: None,
             skip_signed_by_keys: None,
-            use_disk_for_large_nars: false,
-            large_nar_threshold_mb: default_large_nar_threshold_mb(),
             compression: default_compression(),
             prune_enabled: false,
             prune_retention_days: default_prune_retention_days(),
@@ -106,11 +100,6 @@ pub struct S3Config {
 /// Sets the default number of upload threads if not specified.
 fn default_upload_threads() -> usize {
     32
-}
-
-/// Sets the default NAR size threshold in MB.
-fn default_large_nar_threshold_mb() -> u64 {
-    1024 // 1GB
 }
 
 /// Sets the default compression algorithm.

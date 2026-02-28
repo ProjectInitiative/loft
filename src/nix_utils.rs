@@ -322,19 +322,21 @@ pub async fn upload_nar_for_path(
     let file_hash_typed = format!("sha256:{}", file_hash_base32);
     let file_size = file_size_atomic.load(Ordering::SeqCst);
 
-    let nar_info_content = generate_nar_info(
-        path,
-        &nar_key,
-        compression_field,
-        &file_hash_typed,
+    let nar_info_args = NarInfoArgs {
+        store_path: path,
+        url: &nar_key,
+        compression: compression_field,
+        file_hash: &file_hash_typed,
         file_size,
-        &nar_hash_typed,
+        nar_hash: &nar_hash_typed,
         nar_size,
-        &references,
-        ca.as_deref(),
-        &sigs,
+        references: &references,
+        ca: ca.as_deref(),
+        existing_sigs: &sigs,
         config,
-    )?;
+    };
+
+    let nar_info_content = generate_nar_info(nar_info_args)?;
 
     let narinfo_key = get_narinfo_key(&store_path_obj);
     uploader
@@ -344,39 +346,43 @@ pub async fn upload_nar_for_path(
     Ok(())
 }
 
-/// Generates the content of a .narinfo file.
-pub fn generate_nar_info(
-    store_path: &Path,
-    url: &str,
-    compression: &str,
-    file_hash: &str,
-    file_size: u64,
-    nar_hash: &str,
-    nar_size: u64,
-    references: &[String],
-    ca: Option<&str>,
-    existing_sigs: &[String],
-    config: &Config,
-) -> Result<String> {
-    let mut content = String::new();
-    content.push_str(&format!("StorePath: {}\n", store_path.display()));
-    content.push_str(&format!("URL: {}\n", url));
-    content.push_str(&format!("Compression: {}\n", compression));
-    content.push_str(&format!("FileHash: {}\n", file_hash));
-    content.push_str(&format!("FileSize: {}\n", file_size));
-    content.push_str(&format!("NarHash: {}\n", nar_hash));
-    content.push_str(&format!("NarSize: {}\n", nar_size));
-    content.push_str(&format!("References: {}\n", references.join(" ")));
+/// Arguments for generating a .narinfo file.
+pub struct NarInfoArgs<'a> {
+    pub store_path: &'a Path,
+    pub url: &'a str,
+    pub compression: &'a str,
+    pub file_hash: &'a str,
+    pub file_size: u64,
+    pub nar_hash: &'a str,
+    pub nar_size: u64,
+    pub references: &'a [String],
+    pub ca: Option<&'a str>,
+    pub existing_sigs: &'a [String],
+    pub config: &'a Config,
+}
 
-    if let Some(ca_value) = ca {
+/// Generates the content of a .narinfo file.
+pub fn generate_nar_info(args: NarInfoArgs) -> Result<String> {
+    let mut content = String::new();
+    content.push_str(&format!("StorePath: {}\n", args.store_path.display()));
+    content.push_str(&format!("URL: {}\n", args.url));
+    content.push_str(&format!("Compression: {}\n", args.compression));
+    content.push_str(&format!("FileHash: {}\n", args.file_hash));
+    content.push_str(&format!("FileSize: {}\n", args.file_size));
+    content.push_str(&format!("NarHash: {}\n", args.nar_hash));
+    content.push_str(&format!("NarSize: {}\n", args.nar_size));
+    content.push_str(&format!("References: {}\n", args.references.join(" ")));
+
+    if let Some(ca_value) = args.ca {
         content.push_str(&format!("CA: {}\n", ca_value));
     }
 
     let mut new_signature_key_name: Option<String> = None;
 
-    if let (Some(key_path), Some(key_name)) =
-        (&config.loft.signing_key_path, &config.loft.signing_key_name)
-    {
+    if let (Some(key_path), Some(key_name)) = (
+        &args.config.loft.signing_key_path,
+        &args.config.loft.signing_key_name,
+    ) {
         if key_path.exists() {
             let key_file_content = fs::read_to_string(key_path)?;
             let nix_keypair = NixKeypair::from_str(&key_file_content)?;
@@ -395,7 +401,7 @@ pub fn generate_nar_info(
     }
 
     // Add existing signatures, excluding the one we just added (if any)
-    for sig in existing_sigs {
+    for sig in args.existing_sigs {
         if sig.starts_with("ca:") {
             continue;
         }
@@ -508,7 +514,7 @@ mod tests {
         let existing_sigs = vec!["cache.nixos.org-1:sig1".to_string()];
         let config = Config::default();
 
-        let content = generate_nar_info(
+        let nar_info_args = NarInfoArgs {
             store_path,
             url,
             compression,
@@ -516,11 +522,13 @@ mod tests {
             file_size,
             nar_hash,
             nar_size,
-            &references,
+            references: &references,
             ca,
-            &existing_sigs,
-            &config,
-        )?;
+            existing_sigs: &existing_sigs,
+            config: &config,
+        };
+
+        let content = generate_nar_info(nar_info_args)?;
 
         assert!(content.contains("StorePath: /nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0"));
         assert!(content.contains("URL: nar/sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4.nar.xz"));
