@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
             "Clearing local cache at {}...",
             config.loft.local_cache_path.display()
         );
-        local_cache.clear()?;
+        std::fs::remove_file(&config.loft.local_cache_path)?; // Modify this line
         info!("Local cache cleared.");
         return Ok(());
     }
@@ -148,11 +148,7 @@ async fn main() -> Result<()> {
     // Handle manual pruning
     if args.prune {
         info!("Manually triggering pruning...");
-        let pruner = Pruner::new(
-            uploader.clone(),
-            Arc::new(config.clone()),
-            local_cache.clone(),
-        );
+        let pruner = Pruner::new(uploader.clone(), Arc::new(config.clone()));
         pruner.prune_old_objects().await?;
         info!("Manual pruning complete.");
         return Ok(()); // Exit after manual pruning
@@ -181,59 +177,32 @@ async fn main() -> Result<()> {
         local_cache.set_scan_complete()?;
     }
 
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-
     // Start watching the Nix store for new paths.
     info!("Watching for new store paths...");
-    let watcher_handle = tokio::spawn({
-        let uploader = uploader.clone();
-        let local_cache = local_cache.clone();
-        let config = config.clone();
-        let cancel_token = cancel_token.clone();
-        async move {
-            if let Err(e) = nix_store_watcher::watch_store(
-                uploader,
-                local_cache,
-                &config,
-                args.force_scan,
-                cancel_token,
-            )
-            .await
-            {
-                error!("Watcher failed: {:?}", e);
-            }
-        }
-    });
+    nix_store_watcher::watch_store(
+        uploader.clone(),
+        local_cache.clone(),
+        &config,
+        args.force_scan,
+    )
+    .await?;
 
-    let mut pruner_handle = None;
     // Start pruning task if enabled
     if config.loft.prune_enabled {
         if let Some(schedule_str) = config.loft.prune_schedule.clone() {
             match parse_duration_string(&schedule_str) {
                 Ok(duration) => {
                     info!("Starting pruning task with schedule: {:?}", duration);
-                    let pruner = Pruner::new(
-                        uploader.clone(),
-                        Arc::new(config.clone()),
-                        local_cache.clone(),
-                    );
-                    let pruner_cancel_token = cancel_token.clone();
-                    pruner_handle = Some(tokio::spawn(async move {
+                    let pruner = Pruner::new(uploader.clone(), Arc::new(config.clone()));
+                    tokio::spawn(async move {
                         loop {
-                            tokio::select! {
-                                _ = tokio::time::sleep(duration) => {
-                                    info!("Running scheduled pruning job...");
-                                    if let Err(e) = pruner.prune_old_objects().await {
-                                        error!("Error running scheduled pruning job: {:?}", e);
-                                    }
-                                }
-                                _ = pruner_cancel_token.cancelled() => {
-                                    info!("Pruner received cancellation signal. Shutting down.");
-                                    break;
-                                }
+                            tokio::time::sleep(duration).await;
+                            info!("Running scheduled pruning job...");
+                            if let Err(e) = pruner.prune_old_objects().await {
+                                error!("Error running scheduled pruning job: {:?}", e);
                             }
                         }
-                    }));
+                    });
                 }
                 Err(e) => {
                     error!("Invalid prune_schedule in config: {:?}", e);
@@ -243,30 +212,6 @@ async fn main() -> Result<()> {
             warn!("Pruning is enabled but prune_schedule is not set in config.");
         }
     }
-
-    let mut watcher_handle = watcher_handle;
-
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received Ctrl-C, initiating graceful shutdown...");
-            cancel_token.cancel();
-        }
-        res = &mut watcher_handle => {
-            if let Err(e) = res {
-                error!("Watcher handle error: {:?}", e);
-            }
-        }
-    }
-
-    info!("Waiting for watcher to finish...");
-    let _ = watcher_handle.await;
-
-    if let Some(handle) = pruner_handle {
-        info!("Waiting for pruner to finish...");
-        let _ = handle.await;
-    }
-
-    info!("Graceful shutdown complete.");
 
     Ok(())
 }

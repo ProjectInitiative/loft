@@ -7,8 +7,7 @@ use std::ops::{AddAssign, MulAssign};
 use serde::de::{DeserializeSeed, IntoDeserializer, MapAccess, Visitor};
 use serde::{de, forward_to_deserialize_any};
 
-use super::Error;
-use std::result::Result;
+use super::Error; use std::result::Result;
 
 /// The main deserializer.
 pub struct Deserializer<'de> {
@@ -49,7 +48,7 @@ impl<'de> Deserializer<'de> {
     }
 
     fn peek_until_eol(&mut self) -> Result<&'de str, Error> {
-        match self.input.find(['\r', '\n']) {
+        match self.input.find(|c| c == '\r' || c == '\n') {
             Some(idx) => Ok(&self.input[..idx]),
             None => Ok(self.input),
         }
@@ -98,7 +97,7 @@ impl<'de> Deserializer<'de> {
     }
 }
 
-impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
+impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     type Error = Error;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -106,7 +105,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         V: Visitor<'de>,
     {
         // top level must be a map
-        self.deserialize_map(visitor)
+        Ok(self.deserialize_map(visitor)?)
     }
 
     forward_to_deserialize_any! {
@@ -119,7 +118,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_map(self)
+        Ok(visitor.visit_map(self)?)
     }
 
     fn deserialize_struct<V>(
@@ -131,7 +130,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_map(visitor)
+        Ok(self.deserialize_map(visitor)?)
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -149,7 +148,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         let identifier = &self.input[..colon];
 
         self.input = &self.input[colon..];
-        visitor.visit_borrowed_str(identifier)
+        Ok(visitor.visit_borrowed_str(identifier)?)
     }
 }
 
@@ -166,7 +165,7 @@ impl<'de> MapAccess<'de> for Deserializer<'de> {
             return Ok(None);
         }
 
-        seed.deserialize(&mut *self).map(Some)
+        Ok(seed.deserialize(&mut *self).map(Some)?)
     }
 
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
@@ -179,7 +178,7 @@ impl<'de> MapAccess<'de> for Deserializer<'de> {
 
         self.consume_whitespace()?;
 
-        seed.deserialize(&mut ValueDeserializer(self))
+        Ok(seed.deserialize(&mut ValueDeserializer(self))?)
     }
 }
 
@@ -190,14 +189,14 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_str(visitor)
+        Ok(self.deserialize_str(visitor)?)
     }
 
     fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_bool(self.0.parse_bool()?)
+        Ok(visitor.visit_bool(self.0.parse_bool()?)?)
     }
 
     fn deserialize_i8<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
@@ -232,28 +231,28 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u8(self.0.parse_unsigned()?)
+        Ok(visitor.visit_u8(self.0.parse_unsigned()?)?)
     }
 
     fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u16(self.0.parse_unsigned()?)
+        Ok(visitor.visit_u16(self.0.parse_unsigned()?)?)
     }
 
     fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u32(self.0.parse_unsigned()?)
+        Ok(visitor.visit_u32(self.0.parse_unsigned()?)?)
     }
 
     fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u64(self.0.parse_unsigned()?)
+        Ok(visitor.visit_u64(self.0.parse_unsigned()?)?)
     }
 
     fn deserialize_f32<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
@@ -282,7 +281,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_borrowed_str(self.0.parse_until_eol()?.trim_start())
+        Ok(visitor.visit_borrowed_str(self.0.parse_until_eol()?.trim_start())?)
     }
 
     // only accepted in maps
@@ -290,7 +289,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_str(visitor)
+        Ok(self.deserialize_str(visitor)?)
     }
 
     fn deserialize_bytes<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
@@ -312,7 +311,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
         V: Visitor<'de>,
     {
         // in this format, if a key exists, then it must be Some
-        visitor.visit_some(self)
+        Ok(visitor.visit_some(self)?)
     }
 
     fn deserialize_unit<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
@@ -322,26 +321,18 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
         Err(Error::Unsupported("Unit"))
     }
 
-    fn deserialize_unit_struct<V>(
-        self,
-        _name: &'static str,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error>
+    fn deserialize_unit_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        self.deserialize_unit(visitor)
+        Ok(self.deserialize_unit(visitor)?)
     }
 
-    fn deserialize_newtype_struct<V>(
-        self,
-        _name: &'static str,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error>
+    fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_newtype_struct(self)
+        Ok(visitor.visit_newtype_struct(self)?)
     }
 
     fn deserialize_seq<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
@@ -355,19 +346,16 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_seq(visitor)
+        Ok(self.deserialize_seq(visitor)?)
     }
 
-    fn deserialize_tuple_struct<V>(
-        self,
-        _name: &'static str,
-        _len: usize,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error>
+    fn deserialize_tuple_struct<
+        V,
+    >(self, _name: &'static str, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
-        self.deserialize_seq(visitor)
+        Ok(self.deserialize_seq(visitor)?)
     }
 
     fn deserialize_map<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
@@ -386,7 +374,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_map(visitor)
+        Ok(self.deserialize_map(visitor)?)
     }
 
     fn deserialize_enum<V>(
@@ -399,7 +387,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
         V: Visitor<'de>,
     {
         let val = self.0.parse_until_eol()?;
-        visitor.visit_enum(val.into_deserializer())
+        Ok(visitor.visit_enum(val.into_deserializer())?)
     }
 
     fn deserialize_identifier<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
@@ -413,6 +401,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_any(visitor)
+        Ok(self.deserialize_any(visitor)?)
     }
 }

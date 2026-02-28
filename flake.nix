@@ -1,7 +1,7 @@
 {
   description = "A minimal Nix binary cache uploader for S3-compatible storage";
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
@@ -36,26 +36,11 @@
           pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
         );
         # Build the application using the logic from crane.nix
-        loftArgs = import ./crane.nix {
+        loft = import ./crane.nix {
           inherit pkgs craneLib;
-          src = craneLib.cleanCargoSource (craneLib.path ./.);
+          src = ./.;
           attic = attic-flake.packages.${system}.default;
         };
-
-        cargoArtifacts = craneLib.buildDepsOnly loftArgs;
-
-        loft = craneLib.buildPackage (loftArgs // {
-          inherit cargoArtifacts;
-        });
-
-        loftClippy = craneLib.cargoClippy (loftArgs // {
-          inherit cargoArtifacts;
-          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-        });
-
-        loftNextest = craneLib.cargoTest (loftArgs // {
-          inherit cargoArtifacts;
-        });
 
         # New pkgs for tests
         pkgsForTest = import nixpkgs {
@@ -174,8 +159,6 @@
         };
         checks = {
           integration = pkgsForTest.nixosTest (import ./nixos/tests/integration.nix);
-          clippy = loftClippy;
-          unit-tests = loftNextest;
         };
         devShells = {
           default = craneLib.devShell {

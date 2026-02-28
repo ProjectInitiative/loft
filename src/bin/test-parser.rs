@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let filtered_paths_vec: Vec<String> = filtered_paths.keys().cloned().collect();
 
     let all_closure_paths: HashSet<String> =
-        match nix::get_store_paths_closure(&filtered_paths_vec).await {
+        match nix::get_store_paths_closure(filtered_paths_vec).await {
             Ok(paths) => paths.into_iter().collect(),
             Err(e) => {
                 error!("Failed to get closures: {:?}", e);
@@ -45,9 +45,8 @@ async fn main() -> Result<()> {
 
     info!("Total unique closure paths: {}", all_closure_paths.len());
 
-    let all_closure_vec: Vec<String> = all_closure_paths.into_iter().collect();
-
-    let closure_signatures = nix::get_path_signatures(&all_closure_vec).await?;
+    let closure_signatures =
+        nix::get_path_signatures(all_closure_paths.into_iter().collect()).await?;
 
     let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
 

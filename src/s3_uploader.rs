@@ -16,10 +16,9 @@ use chrono::{DateTime, Utc};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
-use bytes::Bytes;
-use crate::cache_checker::RemoteCacheStorage;
 use crate::config::S3Config;
-use futures::future::BoxFuture;
+use attic::nix_store::NixStore;
+
 
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
 
@@ -55,14 +54,11 @@ impl S3Uploader {
                 None,
                 None,
                 "default",
-            ))
-            .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(3));
+            ));
 
         let sdk_config = config_loader.load().await;
 
-        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
-            .force_path_style(true)
-            .build();
+        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config).build();
 
         let client = Client::from_conf(s3_config);
 
@@ -86,23 +82,21 @@ impl S3Uploader {
         let results = futures::stream::iter(store_paths.iter().cloned().map(|path_str| {
             let client = self.client.clone();
             let bucket = self.bucket.clone();
+            let nix_store = NixStore::connect().unwrap();
             let semaphore = semaphore.clone();
 
             async move {
                 let _permit = semaphore.acquire().await.expect("semaphore closed");
 
-                let hash = match crate::local_cache::LocalCache::extract_hash_from_path(&path_str) {
-                    Ok(h) => h,
+                let store_path = match nix_store.parse_store_path(Path::new(&path_str)) {
+                    Ok(sp) => sp,
                     Err(e) => {
-                        debug!(
-                            "Failed to extract hash from store path '{}': {}",
-                            path_str, e
-                        );
+                        debug!("Failed to parse store path '{}': {}", path_str, e);
                         return Err((path_str, e.to_string()));
                     }
                 };
 
-                let key = format!("{}.narinfo", hash);
+                let key = crate::nix_utils::get_narinfo_key(&store_path);
                 debug!("Checking S3 for key: {}", key);
 
                 match client.head_object().bucket(&bucket).key(&key).send().await {
@@ -166,9 +160,8 @@ impl S3Uploader {
                 for object in contents {
                     if let Some(key) = object.key {
                         if key.ends_with(".narinfo") {
-                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:")
-                            {
-                                stripped.to_string()
+                            let processed_key = if key.starts_with("sha256:") {
+                                key[7..].to_string()
                             } else {
                                 key
                             };
@@ -188,120 +181,7 @@ impl S3Uploader {
         Ok(all_keys)
     }
 
-    /// Uploads a stream of bytes to S3 using multipart upload.
-    pub async fn upload_stream<S>(&self, stream: S, key: &str) -> Result<()>
-    where
-        S: futures::Stream<Item = std::result::Result<Bytes, anyhow::Error>> + Send + 'static,
-    {
-        info!("Initiating streaming multipart upload for '{}'.", key);
 
-        let multipart_upload_res = self
-            .client
-            .create_multipart_upload()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await?;
-
-        let upload_id = multipart_upload_res
-            .upload_id
-            .ok_or_else(|| anyhow::anyhow!("Failed to get upload ID"))?;
-
-        let mut parts: Vec<CompletedPart> = Vec::new();
-        let mut part_number = 1;
-
-        let mut pinned_stream = Box::pin(stream);
-        let mut current_part_buffer = Vec::new();
-
-        let upload_result: Result<()> = async {
-            while let Some(chunk_res) = pinned_stream.next().await {
-                let chunk = chunk_res?;
-                current_part_buffer.extend_from_slice(&chunk);
-
-                if current_part_buffer.len() >= MIN_MULTIPART_UPLOAD_SIZE as usize {
-                    let stream = ByteStream::from(current_part_buffer.clone());
-
-                    let upload_part_res = self
-                        .client
-                        .upload_part()
-                        .bucket(&self.bucket)
-                        .key(key)
-                        .upload_id(&upload_id)
-                        .part_number(part_number)
-                        .body(stream)
-                        .send()
-                        .await?;
-
-                    parts.push(
-                        CompletedPart::builder()
-                            .part_number(part_number)
-                            .e_tag(upload_part_res.e_tag.unwrap_or_default())
-                            .build(),
-                    );
-
-                    part_number += 1;
-                    current_part_buffer.clear();
-                }
-            }
-
-            // Upload the final part if there's anything left
-            if !current_part_buffer.is_empty() || part_number == 1 {
-                let stream = ByteStream::from(current_part_buffer);
-
-                let upload_part_res = self
-                    .client
-                    .upload_part()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .upload_id(&upload_id)
-                    .part_number(part_number)
-                    .body(stream)
-                    .send()
-                    .await?;
-
-                parts.push(
-                    CompletedPart::builder()
-                        .part_number(part_number)
-                        .e_tag(upload_part_res.e_tag.unwrap_or_default())
-                        .build(),
-                );
-            }
-
-            self.client
-                .complete_multipart_upload()
-                .bucket(&self.bucket)
-                .key(key)
-                .upload_id(&upload_id)
-                .multipart_upload(
-                    aws_sdk_s3::types::CompletedMultipartUpload::builder()
-                        .set_parts(Some(parts))
-                        .build(),
-                )
-                .send()
-                .await?;
-            Ok(())
-        }
-        .await;
-
-        match upload_result {
-            Ok(_) => {
-                info!("Successfully uploaded stream to '{}'.", key);
-            }
-            Err(e) => {
-                warn!("Streaming upload failed for '{}'. Aborting...", key);
-                let _ = self
-                    .client
-                    .abort_multipart_upload()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .upload_id(&upload_id)
-                    .send()
-                    .await;
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
 
     /// Uploads a file to S3, using multipart upload for large files.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {
@@ -343,96 +223,61 @@ impl S3Uploader {
                 .ok_or_else(|| anyhow::anyhow!("Failed to get upload ID"))?;
 
             let mut parts: Vec<CompletedPart> = Vec::new();
-            let mut file = match File::open(file_path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    self.client
-                        .abort_multipart_upload()
-                        .bucket(&self.bucket)
-                        .key(key)
-                        .upload_id(&upload_id)
-                        .send()
-                        .await?;
-                    return Err(e.into());
-                }
-            };
+            let mut file = File::open(file_path).await?;
             let mut part_number = 1;
             let mut bytes_read = 0;
 
-            let upload_result: Result<()> = async {
-                while bytes_read < file_size {
-                    let mut buffer = vec![0; MIN_MULTIPART_UPLOAD_SIZE as usize];
-                    let read_len = file.read(&mut buffer).await?;
+            while bytes_read < file_size {
+                let mut buffer = vec![0; MIN_MULTIPART_UPLOAD_SIZE as usize];
+                let read_len = file.read(&mut buffer).await?;
 
-                    if read_len == 0 {
-                        break; // End of file
-                    }
-
-                    let chunk = &buffer[..read_len];
-                    let stream = ByteStream::from(chunk.to_vec());
-
-                    let upload_part_res = self
-                        .client
-                        .upload_part()
-                        .bucket(&self.bucket)
-                        .key(key)
-                        .upload_id(&upload_id)
-                        .part_number(part_number)
-                        .body(stream)
-                        .send()
-                        .await?;
-
-                    parts.push(
-                        CompletedPart::builder()
-                            .part_number(part_number)
-                            .e_tag(upload_part_res.e_tag.unwrap_or_default())
-                            .build(),
-                    );
-
-                    bytes_read += read_len as u64;
-                    part_number += 1;
+                if read_len == 0 {
+                    break; // End of file
                 }
 
-                self.client
-                    .complete_multipart_upload()
+                let chunk = &buffer[..read_len];
+                let stream = ByteStream::from(chunk.to_vec());
+
+                let upload_part_res = self
+                    .client
+                    .upload_part()
                     .bucket(&self.bucket)
                     .key(key)
                     .upload_id(&upload_id)
-                    .multipart_upload(
-                        aws_sdk_s3::types::CompletedMultipartUpload::builder()
-                            .set_parts(Some(parts))
-                            .build(),
-                    )
+                    .part_number(part_number)
+                    .body(stream)
                     .send()
                     .await?;
-                Ok(())
-            }
-            .await;
 
-            match upload_result {
-                Ok(_) => {
-                    info!(
-                        "Successfully uploaded '{}' to '{}' using multipart upload.",
-                        file_path.display(),
-                        key
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Multipart upload failed for '{}'. Aborting...",
-                        file_path.display()
-                    );
-                    let _ = self
-                        .client
-                        .abort_multipart_upload()
-                        .bucket(&self.bucket)
-                        .key(key)
-                        .upload_id(&upload_id)
-                        .send()
-                        .await;
-                    return Err(e);
-                }
+                parts.push(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(upload_part_res.e_tag.unwrap_or_default())
+                        .build(),
+                );
+
+                bytes_read += read_len as u64;
+                part_number += 1;
             }
+
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .multipart_upload(
+                    aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                        .set_parts(Some(parts))
+                        .build(),
+                )
+                .send()
+                .await?;
+
+            info!(
+                "Successfully uploaded '{}' to '{}' using multipart upload.",
+                file_path.display(),
+                key
+            );
         }
         Ok(())
     }
@@ -475,73 +320,50 @@ impl S3Uploader {
             let mut current_pos = 0;
             let mut part_number = 1;
 
-            let upload_result: Result<()> = async {
-                while current_pos < bytes_len {
-                    let end_pos = (current_pos + MIN_MULTIPART_UPLOAD_SIZE).min(bytes_len);
-                    let chunk = &bytes[current_pos as usize..end_pos as usize];
-                    let stream = ByteStream::from(chunk.to_vec());
+            while current_pos < bytes_len {
+                let end_pos = (current_pos + MIN_MULTIPART_UPLOAD_SIZE).min(bytes_len);
+                let chunk = &bytes[current_pos as usize..end_pos as usize];
+                let stream = ByteStream::from(chunk.to_vec());
 
-                    let upload_part_res = self
-                        .client
-                        .upload_part()
-                        .bucket(&self.bucket)
-                        .key(key)
-                        .upload_id(&upload_id)
-                        .part_number(part_number)
-                        .body(stream)
-                        .send()
-                        .await?;
-
-                    parts.push(
-                        CompletedPart::builder()
-                            .part_number(part_number)
-                            .e_tag(upload_part_res.e_tag.unwrap_or_default())
-                            .build(),
-                    );
-
-                    current_pos = end_pos;
-                    part_number += 1;
-                }
-
-                self.client
-                    .complete_multipart_upload()
+                let upload_part_res = self
+                    .client
+                    .upload_part()
                     .bucket(&self.bucket)
                     .key(key)
                     .upload_id(&upload_id)
-                    .multipart_upload(
-                        aws_sdk_s3::types::CompletedMultipartUpload::builder()
-                            .set_parts(Some(parts))
-                            .build(),
-                    )
+                    .part_number(part_number)
+                    .body(stream)
                     .send()
                     .await?;
-                Ok(())
-            }
-            .await;
 
-            match upload_result {
-                Ok(_) => {
-                    info!(
-                        "Successfully uploaded bytes to '{}' using multipart upload.",
-                        key
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Multipart upload failed for bytes to '{}'. Aborting...",
-                        key
-                    );
-                    let _ = self
-                        .client
-                        .abort_multipart_upload()
-                        .bucket(&self.bucket)
-                        .key(key)
-                        .upload_id(&upload_id)
-                        .send()
-                        .await;
-                    return Err(e);
-                }
+                parts.push(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(upload_part_res.e_tag.unwrap_or_default())
+                        .build(),
+                );
+
+                current_pos = end_pos;
+                part_number += 1;
             }
+
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .multipart_upload(
+                    aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                        .set_parts(Some(parts))
+                        .build(),
+                )
+                .send()
+                .await?;
+
+            info!(
+                "Successfully uploaded bytes to '{}' using multipart upload.",
+                key
+            );
         }
         Ok(())
     }
@@ -615,20 +437,6 @@ impl S3Uploader {
         }
         info!("Current bucket size: {} bytes", total_size);
         Ok(total_size)
-    }
-}
-
-impl RemoteCacheStorage for S3Uploader {
-    fn check_paths_exist<'a>(
-        &'a self,
-        store_paths: &'a [String],
-        max_concurrency: usize,
-    ) -> BoxFuture<'a, Result<(Vec<String>, Vec<String>)>> {
-        Box::pin(async move { self.check_paths_exist(store_paths, max_concurrency).await })
-    }
-
-    fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
-        Box::pin(async move { self.list_all_narinfo_keys().await })
     }
 }
 

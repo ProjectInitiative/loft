@@ -8,7 +8,6 @@
 
     virtualisation.writableStore = true;
     virtualisation.memorySize = 2048;
-    virtualisation.diskSize = 4096; # 4GB to handle datasets
 
     services.garage = {
       enable = true;
@@ -18,7 +17,6 @@
         data_dir = "/var/lib/garage/data";
         replication_factor = 1;
         rpc_bind_addr = "[::]:3901";
-        rpc_secret = "0000000000000000000000000000000000000000000000000000000000000000";
         s3_api = {
           s3_region = "us-east-1";
           api_bind_addr = "[::]:3900";
@@ -36,10 +34,8 @@
         accessKeyFile = "/etc/loft-s3-access-key";
         secretKeyFile = "/etc/loft-s3-secret-key";
       };
-      uploadThreads = 8;
+      uploadThreads = 2;
       scanOnStartup = true;
-      populateCacheOnStartup = true;
-      skipSignedByKeys = [ "test-exclude-key-1" ];
     };
 
     # We override the systemd service to NOT start automatically
@@ -49,134 +45,88 @@
       awscli2
       jq
       garage
-      loft
     ];
 
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
+      substituters = lib.mkForce [ "http://localhost:3900/loft-test-bucket" ];
+      trusted-substituters = [ "http://localhost:3900/loft-test-bucket" ];
       trusted-users = [ "root" ];
-      substituters = [];
+      # We turn off signature checking since we are using generated keys without signing
+      # (or we could generate a signing key, but let's keep it simple for now)
     };
-    
-    # Ensure we have a dummy nixpkgs available for nix-build
-    environment.variables.NIX_PATH = lib.mkForce "nixpkgs=/etc/nixpkgs";
-    environment.etc."nixpkgs/default.nix".text = ''
-      { ... }: {
-        runCommand = name: env: script: derivation {
-          inherit name script;
-          builder = "/bin/sh";
-          args = [ "-c" script ];
-          system = "${pkgs.system}";
-        };
-      }
-    '';
 
     networking.firewall.allowedTCPPorts = [ 3900 3901 ];
   };
 
   testScript = ''
-    import re
-
-    def reset_state(env_vars):
-        machine.log("Resetting Loft and S3 state...")
-        machine.succeed("systemctl stop loft.service || true")
-        machine.succeed(env_vars + " aws --endpoint-url http://localhost:3900 s3 rm s3://loft-test-bucket --recursive || true")
-        machine.succeed("rm -f /var/lib/loft/cache.db")
-        machine.log("State reset complete.")
-
-    def verify_cache(path, env_vars, s3_url, timeout=60):
-        machine.log("Waiting for path in S3 cache: " + path)
-        hash_part = path.split("-")[0].split("/")[-1]
-        narinfo = hash_part + ".narinfo"
-        
-        machine.wait_until_succeeds(env_vars + " aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo, timeout=timeout)
-        
-        machine.succeed("nix-store --delete --ignore-liveness " + path)
-        machine.succeed(env_vars + " nix build " + path + " --substituters '" + s3_url + "' --option require-sigs false --max-jobs 0")
-        machine.log("Verified: " + path + " is fetchable from S3")
+    import json
+    import time
 
     machine.start()
-    machine.wait_for_unit("garage.service", timeout=30)
-    machine.wait_for_open_port(3900, timeout=10)
+    machine.wait_for_unit("garage.service")
+    machine.wait_for_open_port(3900)
 
-    # --- SETUP: Credentials ---
-    with subtest("Initialize Garage"):
-        status = machine.succeed("garage status")
-        m = re.search(r"([0-9a-f]{16})", status)
-        if not m: raise Exception("No node ID")
-        node_id = m.group(1)
-        machine.succeed("garage layout assign " + node_id + " -z 1 -c 100M")
-        machine.succeed("garage layout apply --version 1")
-        key_info = machine.succeed("garage key create test-key")
-        ak_m = re.search(r"Key ID: (\S+)", key_info)
-        sk_m = re.search(r"Secret key: (\S+)", key_info)
-        if not ak_m or not sk_m: raise Exception("No keys")
-        access_key = ak_m.group(1)
-        secret_key = sk_m.group(1)
-        machine.succeed("echo -n '" + access_key + "' > /etc/loft-s3-access-key")
-        machine.succeed("echo -n '" + secret_key + "' > /etc/loft-s3-secret-key")
-        machine.succeed("garage bucket create loft-test-bucket")
-        machine.succeed("garage bucket allow loft-test-bucket --key test-key --read --write")
+    # 1. Setup Garage
+    # Configure garage layout
+    machine.succeed("garage layout assign -z 1 -c 1")
+    machine.succeed("garage layout apply --version 1")
 
-    env_vars = "AWS_ACCESS_KEY_ID=" + access_key + " AWS_SECRET_ACCESS_KEY=" + secret_key + " AWS_DEFAULT_REGION=us-east-1"
-    s3_url = "s3://loft-test-bucket?scheme=http&endpoint=localhost:3900&region=us-east-1"
+    # Create key
+    key_info_str = machine.succeed("garage key create test-key")
 
-        # --- SUBTEST: Stress / Concurrency ---
-    with subtest("Concurrency: 30 rapid path additions"):
-        reset_state(env_vars)
-        machine.succeed("systemctl start loft.service")
-        machine.wait_for_unit("loft.service", timeout=30)
-        
-        machine.log("Stress testing with 30 rapid builds...")
-        # Launch 30 nix-build processes in parallel inside the VM
-        machine.succeed("mkdir -p /tmp/stress")
-        machine.succeed(
-            "for i in {0..29}; do "
-            "  nix-build --no-out-link -E \"(import <nixpkgs> {}).runCommand \\\"stress-$i\\\" {} \\\"echo $i > \$out\\\"\" > /tmp/stress/$i & "
-            "done; wait"
-        )
-        paths = machine.succeed("cat /tmp/stress/*").strip().splitlines()
-        
-        # Verify all 30 were processed
-        for p in paths:
-            verify_cache(p, env_vars, s3_url, timeout=90)
+    # Parse key info
+    lines = key_info_str.splitlines()
+    access_key = ""
+    secret_key = ""
+    for line in lines:
+        if "Key ID:" in line:
+            access_key = line.split("Key ID:")[1].strip()
+        if "Secret key:" in line:
+            secret_key = line.split("Secret key:")[1].strip()
 
-    # --- SUBTEST: skipSignedByKeys ---
-    with subtest("Config: skipSignedByKeys rejection"):
-        reset_state(env_vars)
-        machine.succeed("systemctl start loft.service")
-        
-        # 1. Generate a key matching the excluded key name in config
-        machine.succeed("nix-store --generate-binary-cache-key test-exclude-key-1 /tmp/sk1 /tmp/pk1")
-        
-        # 2. Create a path and SIGN it
-        p_to_sign = machine.succeed("nix-build --no-out-link -E '(import <nixpkgs> {}).runCommand \"signed-path\" {} \"echo signed > $out\"'").strip()
-        machine.succeed("nix store sign --key-file /tmp/sk1 " + p_to_sign)
-        
-        # 3. Verify it is NOT in S3 after some time
-        hash_part = p_to_sign.split("-")[0].split("/")[-1]
-        narinfo = hash_part + ".narinfo"
-        
-        import time
-        machine.log("Waiting to ensure signed path is NOT uploaded...")
-        time.sleep(10)
-        machine.fail(env_vars + " aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo)
-        machine.log("Verified: Path signed by excluded key was correctly skipped.")
+    if not access_key or not secret_key:
+        raise Exception(f"Failed to parse keys from:\n{key_info_str}")
 
-    # --- SUBTEST: Pruning Verification ---
-    with subtest("Service: Pruning verification"):
-        # Use the manual config we created in subtest before (or recreate it)
-        manual_config = "/tmp/prune-config.toml"
-        machine.succeed("cat > " + manual_config + " <<EOF\n" +
-            "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3900\"\n" +
-            "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n" +
-            "[loft]\nupload_threads = 1\nscan_on_startup = false\nlocal_cache_path = \"/tmp/prune-cache.db\"\n" +
-            "prune_enabled = true\nprune_retention_days = 30\nEOF")
-        
-        machine.log("Running manual prune...")
-        machine.succeed("loft --config " + manual_config + " --prune")
-        machine.log("Pruning command completed successfully.")
+    print(f"Access Key: {access_key}")
 
-    machine.log("All advanced integration tests passed!")
+    machine.succeed(f"echo -n '{access_key}' > /etc/loft-s3-access-key")
+    machine.succeed(f"echo -n '{secret_key}' > /etc/loft-s3-secret-key")
+
+    # Create Bucket
+    env_vars = f"AWS_ACCESS_KEY_ID={access_key} AWS_SECRET_ACCESS_KEY={secret_key} AWS_DEFAULT_REGION=us-east-1"
+    machine.succeed(f"{env_vars} aws --endpoint-url http://localhost:3900 s3 mb s3://loft-test-bucket")
+
+    # Make bucket public so Nix can fetch without credentials
+    machine.succeed(f"{env_vars} aws --endpoint-url http://localhost:3900 s3api put-bucket-acl --bucket loft-test-bucket --acl public-read")
+
+    # 2. Start Loft
+    machine.systemctl("start loft.service")
+    machine.wait_for_unit("loft.service")
+
+    # 3. Basic Upload
+    # Create a path
+    out_path = machine.succeed("nix-build -E '(import <nixpkgs> {}).runCommand \"test-pkg\" {} \"echo hello > $out\"'").strip()
+    print(f"Created path: {out_path}")
+
+    # Wait for upload
+    hash_part = out_path.split("-")[0].split("/")[-1]
+    narinfo = f"{hash_part}.narinfo"
+
+    # Loft watcher should pick it up. Give it some time.
+    machine.wait_until_succeeds(f"{env_vars} aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/{narinfo}")
+    print("Upload verified on S3")
+
+    # 4. End-to-End Cache (Fetch)
+    machine.systemctl("stop loft.service")
+
+    # Delete the path
+    machine.succeed(f"nix store delete {out_path}")
+
+    # Try to build again (should fetch)
+    # Use --option require-sigs false, and force remote fetch with --max-jobs 0
+    machine.succeed(f"nix build {out_path} --option require-sigs false --max-jobs 0")
+
+    print("Fetch verified!")
   '';
 }

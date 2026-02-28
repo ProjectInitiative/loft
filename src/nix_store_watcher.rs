@@ -6,7 +6,7 @@ use notify::{Error as NotifyError, Event, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{error, info};
 
 use crate::cache_checker::CacheChecker;
@@ -31,7 +31,7 @@ pub async fn scan_and_process_existing_paths(
     force_scan: bool,
 ) -> Result<()> {
     info!("Starting scan of existing store paths...");
-    let nix_store = Arc::new(NixStore::connect()?);
+    let nix_store = NixStore::connect()?;
 
     // 1. Gather paths that are not signed by skipped keys
     let keys_to_skip = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
@@ -41,7 +41,7 @@ pub async fn scan_and_process_existing_paths(
 
     // 2. Get the closure of the filtered paths
     let all_closure_paths: HashSet<String> =
-        match nix::get_store_paths_closure(&filtered_paths_vec).await {
+        match nix::get_store_paths_closure(filtered_paths_vec).await {
             Ok(paths) => paths.into_iter().collect(),
             Err(e) => {
                 error!("Failed to get closures: {:?}", e);
@@ -50,33 +50,25 @@ pub async fn scan_and_process_existing_paths(
         };
     info!("Total unique closure paths: {}", all_closure_paths.len());
 
-    let all_closure_vec: Vec<String> = all_closure_paths.into_iter().collect();
-
-    // 3. Check caches (local + remote) BEFORE fetching signatures for the whole closure
-    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
-    let mut result = checker
-        .check_paths(nix_store.as_ref(), &all_closure_vec, force_scan)
-        .await?;
-
-    if result.to_upload.is_empty() {
-        info!("No missing paths to upload.");
-        return Ok(());
-    }
-
-    // 4. Get signatures for only the MISSING closure paths and filter again
-    let closure_signatures = nix::get_path_signatures(&result.to_upload).await?;
+    // 3. Get signatures for the closure and filter again
+    let closure_signatures =
+        nix::get_path_signatures(all_closure_paths.into_iter().collect()).await?;
     let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
     let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
     info!(
-        "Total paths after filtering missing closure paths: {}",
+        "Total paths after filtering closure: {}",
         filtered_closure_vec.len()
     );
 
-    result.to_upload = filtered_closure_vec;
+    // 4. Check caches (local + remote)
+    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
+    let result = checker
+        .check_paths(&nix_store, filtered_closure_vec, force_scan)
+        .await?;
 
-    // 5. Upload missing
+    // 3. Upload missing
     if result.to_upload.is_empty() {
-        info!("No missing paths to upload after signature filtering.");
+        info!("No missing paths to upload.");
         return Ok(());
     }
 
@@ -84,51 +76,59 @@ pub async fn scan_and_process_existing_paths(
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
     let mut tasks = Vec::new();
 
-    for path_str in result.to_upload {
+    for (path_str, _path_info) in result.to_upload {
         let uploader_clone = uploader.clone();
+        let local_cache_clone = local_cache.clone();
         let config_clone = config.clone();
         let semaphore_clone = semaphore.clone();
-        let permit = semaphore_clone.acquire_owned().await.unwrap();
         tasks.push(tokio::spawn(async move {
-            let p = Path::new(&path_str).to_path_buf();
-            let result = nix::upload_nar_for_path(uploader_clone, &p, &config_clone).await;
+            let permit = semaphore_clone.acquire_owned().await.unwrap();
+            let (tx, rx) = oneshot::channel();
 
-            let res = match result {
-                Ok(_) => {
-                    let path_hash =
-                        crate::local_cache::LocalCache::extract_hash_from_path(&path_str).unwrap();
-                    Some(path_hash)
+            let p = Path::new(&path_str).to_path_buf();
+            let uploader_clone_block = uploader_clone.clone();
+            let config_clone_block = config_clone.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let result = rt.block_on(async {
+                    nix::upload_nar_for_path(uploader_clone_block, &p, &config_clone_block).await
+                });
+                let _ = tx.send(result);
+            });
+
+            match rx.await {
+                Ok(Ok(_)) => {
+                    let store_path = NixStore::connect()
+                        .unwrap()
+                        .parse_store_path(Path::new(&path_str))
+                        .unwrap();
+                    let path_hash_obj = store_path.to_hash();
+                    let path_hash = path_hash_obj.as_str();
+                    if let Err(e) = local_cache_clone.add_path_hash(path_hash) {
+                        error!("Failed to add path {} to local cache: {:?}", path_str, e);
+                    }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("Failed to upload path {}: {:?}", path_str, e);
-                    None
                 }
-            };
+                Err(_) => {
+                    error!(
+                        "Upload task for path {} failed unexpectedly (thread panicked).",
+                        path_str
+                    );
+                }
+            }
             drop(permit);
-            res
         }));
     }
 
-    let uploaded_hashes: Vec<String> = join_all(tasks)
-        .await
-        .into_iter()
-        .filter_map(|res| res.ok().flatten())
-        .collect();
-
-    if !uploaded_hashes.is_empty() {
-        if let Err(e) = local_cache.add_many_path_hashes(&uploaded_hashes) {
-            error!("Failed to batch add paths to local cache: {:?}", e);
-        } else {
-            info!(
-                "Successfully added {} paths to local cache.",
-                uploaded_hashes.len()
-            );
-        }
-    }
+    join_all(tasks).await;
     Ok(())
 }
-
-use tokio_util::sync::CancellationToken;
 
 /// Watches the Nix store and uploads new paths.
 pub async fn watch_store(
@@ -136,17 +136,15 @@ pub async fn watch_store(
     local_cache: Arc<LocalCache>,
     config: &Config,
     force_scan: bool,
-    cancel_token: CancellationToken,
 ) -> Result<()> {
     let nix_store = NixStore::connect()?;
     let (tx, mut rx) = mpsc::channel(100);
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
-    let mut join_set = tokio::task::JoinSet::new();
 
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, NotifyError>| {
         if let Ok(event) = res {
             for path in event.paths {
-                if event.kind.is_remove() && path.extension().is_some_and(|e| e == "lock") {
+                if event.kind.is_remove() && path.extension().map_or(false, |e| e == "lock") {
                     if let Some(path_str) = path.to_str() {
                         let store_path = path_str.trim_end_matches(".lock");
                         info!("Detected new store path: {}", store_path);
@@ -165,42 +163,27 @@ pub async fn watch_store(
         nix_store.store_dir()
     );
 
-    loop {
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                info!("Watcher received cancellation signal. Shutting down.");
-                break;
+    while let Some(path) = rx.recv().await {
+        let uploader_clone = uploader.clone();
+        let local_cache_clone = local_cache.clone();
+        let semaphore_clone = semaphore.clone();
+        let config_for_task = config.clone(); // Clone config for the spawned task
+        tokio::spawn(async move {
+            let permit = semaphore_clone.acquire_owned().await.unwrap();
+            if let Err(e) = process_path(
+                uploader_clone,
+                local_cache_clone,
+                &path,
+                &config_for_task,
+                force_scan,
+            )
+            .await
+            {
+                error!("Failed to process '{}': {:?}", path.display(), e);
             }
-            path_opt = rx.recv() => {
-                if let Some(path) = path_opt {
-                    let uploader_clone = uploader.clone();
-                    let local_cache_clone = local_cache.clone();
-                    let semaphore_clone = semaphore.clone();
-                    let config_for_task = config.clone(); // Clone config for the spawned task
-                    join_set.spawn(async move {
-                        let permit = semaphore_clone.acquire_owned().await.unwrap();
-                        if let Err(e) = process_path(
-                            uploader_clone,
-                            local_cache_clone,
-                            &path,
-                            &config_for_task,
-                            force_scan,
-                        )
-                        .await
-                        {
-                            error!("Failed to process '{}': {:?}", path.display(), e);
-                        }
-                        drop(permit);
-                    });
-                } else {
-                    break;
-                }
-            }
-        }
+            drop(permit);
+        });
     }
-
-    info!("Waiting for active uploads to finish...");
-    while (join_set.join_next().await).is_some() {}
 
     Ok(())
 }
@@ -213,14 +196,11 @@ pub async fn process_path(
     config: &Config,
     force_scan: bool,
 ) -> Result<()> {
-    // Add a small delay to allow for follow-up operations like signing
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
     let path_str = path.to_str().unwrap_or("").to_string();
 
     // 1. Filter the path
     let keys_to_skip = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
-    let sigs_map = nix::get_path_signatures(std::slice::from_ref(&path_str)).await?;
+    let sigs_map = nix::get_path_signatures(vec![path_str.clone()]).await?;
     let filtered_paths = nix::filter_out_sig_keys(sigs_map, keys_to_skip.clone()).await?;
 
     if filtered_paths.is_empty() {
@@ -231,78 +211,65 @@ pub async fn process_path(
     // 2. Get closure
     let closure = nix::get_store_path_closure(&path_str).await?;
 
-    // 3. Check caches BEFORE fetching signatures
-    let nix_store = Arc::new(NixStore::connect()?);
-    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
-    let mut result = checker
-        .check_paths(nix_store.as_ref(), &closure, force_scan)
-        .await?;
-
-    if result.to_upload.is_empty() {
-        info!("No missing paths to upload for {}.", path.display());
-        return Ok(());
-    }
-
-    // 4. Get signatures for only the MISSING closure paths and filter again
-    let closure_signatures = nix::get_path_signatures(&result.to_upload).await?;
+    // 3. Get signatures for the closure and filter again
+    let closure_signatures = nix::get_path_signatures(closure.into_iter().collect()).await?;
     let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
     let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
     info!(
-        "Total paths after filtering missing closure for {}: {}",
+        "Total paths after filtering closure for {}: {}",
         path.display(),
         filtered_closure_vec.len()
     );
 
-    result.to_upload = filtered_closure_vec;
+    // 4. Check caches
+    let nix_store = NixStore::connect()?;
+    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
+    let result = checker
+        .check_paths(&nix_store, filtered_closure_vec, force_scan)
+        .await?;
 
     // 5. Upload missing
-    let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
-    let mut tasks = Vec::new();
-
-    for path_str in result.to_upload {
+    for (path_str, _path_info) in result.to_upload {
         let uploader_clone = uploader.clone();
+        let local_cache_clone = local_cache.clone();
         let config_clone = config.clone();
-        let semaphore_clone = semaphore.clone();
-        let path_str_clone = path_str.clone();
+        let (tx, rx) = oneshot::channel();
+        let p = Path::new(&path_str).to_path_buf();
+        let uploader_clone_block = uploader_clone.clone();
+        let config_clone_block = config_clone.clone();
 
-        tasks.push(tokio::spawn(async move {
-            let _permit = semaphore_clone.acquire().await.unwrap();
-            let p = Path::new(&path_str_clone).to_path_buf();
-            let res = match nix::upload_nar_for_path(uploader_clone, &p, &config_clone).await {
-                Ok(_) => {
-                    let path_hash =
-                        crate::local_cache::LocalCache::extract_hash_from_path(&path_str_clone)
-                            .unwrap();
-                    Some(path_hash)
+        tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = rt.block_on(async {
+                nix::upload_nar_for_path(uploader_clone_block, &p, &config_clone_block).await
+            });
+            let _ = tx.send(result);
+        });
+
+        match rx.await {
+            Ok(Ok(_)) => {
+                let store_path = NixStore::connect()
+                    .unwrap()
+                    .parse_store_path(Path::new(&path_str))
+                    .unwrap();
+                let path_hash_obj = store_path.to_hash();
+                let path_hash = path_hash_obj.as_str();
+                if let Err(e) = local_cache_clone.add_path_hash(path_hash) {
+                    error!("Failed to add path {} to local cache: {:?}", path_str, e);
                 }
-                Err(e) => {
-                    error!("Failed to upload path {}: {:?}", path_str_clone, e);
-                    None
-                }
-            };
-            res
-        }));
-    }
-
-    let uploaded_hashes: Vec<String> = futures::future::join_all(tasks)
-        .await
-        .into_iter()
-        .filter_map(|res| res.ok().flatten())
-        .collect();
-
-    if !uploaded_hashes.is_empty() {
-        if let Err(e) = local_cache.add_many_path_hashes(&uploaded_hashes) {
-            error!(
-                "Failed to batch add paths to local cache for {}: {:?}",
-                path.display(),
-                e
-            );
-        } else {
-            info!(
-                "Successfully added {} paths to local cache for {}.",
-                uploaded_hashes.len(),
-                path.display()
-            );
+            }
+            Ok(Err(e)) => {
+                error!("Failed to upload path {}: {:?}", path_str, e);
+            }
+            Err(_) => {
+                error!(
+                    "Upload task for path {} failed unexpectedly (thread panicked).",
+                    path_str
+                );
+            }
         }
     }
 
