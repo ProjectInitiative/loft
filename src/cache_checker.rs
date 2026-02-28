@@ -249,6 +249,9 @@ mod tests {
         }
     }
 
+    /// Tests that the logic for checking paths properly queries both the local
+    /// and remote caches. Ensures paths only locally cached are ignored, paths
+    /// remotely cached are skipped but added locally, and uncached paths are returned.
     #[tokio::test]
     async fn test_check_paths_logic() -> Result<()> {
         let path1 = "/nix/store/path1";
@@ -314,6 +317,67 @@ mod tests {
         let local_hashes = local_cache.find_existing_hashes(&vec![hash3.to_string()])?;
         assert!(local_hashes.contains(hash3));
 
+        Ok(())
+    }
+
+    /// Tests that when all paths are already in the local cache,
+    /// the method immediately returns an empty upload list without
+    /// querying the remote cache.
+    #[tokio::test]
+    async fn test_check_paths_all_local() -> Result<()> {
+        let path1 = "/nix/store/path1";
+        let hash1 = "hash1";
+
+        let mut hashes = HashMap::new();
+        hashes.insert(path1.to_string(), hash1.to_string());
+
+        let local_cache = Arc::new(MockLocalCache::new(vec![hash1.to_string()]));
+        let remote_cache = Arc::new(MockRemoteCache::new(vec![]));
+        let nix_provider = MockNixHashProvider::new(hashes);
+        let config = crate::config::Config {
+            s3: crate::config::S3Config {
+                endpoint: "".to_string(), region: "".to_string(), bucket: "".to_string(), access_key: None, secret_key: None,
+            },
+            loft: crate::config::LoftConfig {
+                local_cache_path: std::path::PathBuf::from(""), signing_key_path: None, signing_key_name: None, upload_threads: 1, skip_signed_by_keys: None, large_nar_threshold_mb: 0, use_disk_for_large_nars: false, compression: crate::config::Compression::Zstd, prune_enabled: false, prune_schedule: None, prune_retention_days: 30, prune_max_size_gb: None, prune_target_percentage: Some(90), scan_on_startup: false, populate_cache_on_startup: false,
+            },
+        };
+
+        let checker = CacheChecker::new(remote_cache, local_cache, config);
+        let result = checker.check_paths(&nix_provider, vec![path1.to_string()], false).await?;
+
+        assert!(result.to_upload.is_empty());
+        Ok(())
+    }
+
+    /// Tests that when `force_scan` is true, the local cache check is bypassed.
+    #[tokio::test]
+    async fn test_check_paths_force_scan() -> Result<()> {
+        let path1 = "/nix/store/path1";
+        let hash1 = "hash1";
+
+        let mut hashes = HashMap::new();
+        hashes.insert(path1.to_string(), hash1.to_string());
+
+        // Even though hash1 is locally cached...
+        let local_cache = Arc::new(MockLocalCache::new(vec![hash1.to_string()]));
+        let remote_cache = Arc::new(MockRemoteCache::new(vec![])); // but NOT remotely cached
+        let nix_provider = MockNixHashProvider::new(hashes);
+        let config = crate::config::Config {
+            s3: crate::config::S3Config {
+                endpoint: "".to_string(), region: "".to_string(), bucket: "".to_string(), access_key: None, secret_key: None,
+            },
+            loft: crate::config::LoftConfig {
+                local_cache_path: std::path::PathBuf::from(""), signing_key_path: None, signing_key_name: None, upload_threads: 1, skip_signed_by_keys: None, large_nar_threshold_mb: 0, use_disk_for_large_nars: false, compression: crate::config::Compression::Zstd, prune_enabled: false, prune_schedule: None, prune_retention_days: 30, prune_max_size_gb: None, prune_target_percentage: Some(90), scan_on_startup: false, populate_cache_on_startup: false,
+            },
+        };
+
+        let checker = CacheChecker::new(remote_cache, local_cache, config);
+
+        // ...using force_scan = true will cause it to query remote, see it's missing, and return it for upload.
+        let result = checker.check_paths(&nix_provider, vec![path1.to_string()], true).await?;
+
+        assert_eq!(result.to_upload, vec![path1.to_string()]);
         Ok(())
     }
 }

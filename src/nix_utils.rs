@@ -494,6 +494,8 @@ pub async fn get_store_path_closure(store_path: &str) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    /// Tests that the path signature parser correctly parses the JSON output
+    /// of `nix path-info --sigs` into Crypto and ContentAddressed enums.
     #[test]
     fn test_parse_path_signatures() -> Result<()> {
         let json_output = r#"{
@@ -526,6 +528,35 @@ mod tests {
         let sigs2 = result.get("/nix/store/path2").unwrap();
         assert_eq!(sigs2.len(), 1);
         assert!(matches!(&sigs2[0], Signature::Crypto { key_name, signature } if key_name == "other-key" && signature == "sig2"));
+
+        Ok(())
+    }
+
+    /// Tests the filter_out_sig_keys logic to ensure paths signed by any key
+    /// in the provided 'skip' list are completely removed from the resulting map.
+    #[tokio::test]
+    async fn test_filter_out_sig_keys() -> Result<()> {
+        let mut map = HashMap::new();
+
+        let path1 = "/nix/store/path1";
+        let sigs1 = vec![
+            Signature::Crypto { key_name: "skip-key".to_string(), signature: "sig".to_string() },
+        ];
+        map.insert(path1.to_string(), sigs1);
+
+        let path2 = "/nix/store/path2";
+        let sigs2 = vec![
+            Signature::Crypto { key_name: "keep-key".to_string(), signature: "sig".to_string() },
+        ];
+        map.insert(path2.to_string(), sigs2);
+
+        let keys_to_skip = vec!["skip-key".to_string()];
+
+        let filtered = filter_out_sig_keys(map, keys_to_skip).await?;
+
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.contains_key(path2));
+        assert!(!filtered.contains_key(path1));
 
         Ok(())
     }

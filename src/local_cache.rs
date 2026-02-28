@@ -340,6 +340,8 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    /// Tests standard local cache operations including initialization,
+    /// adding paths, looking up paths, and checking existence.
     #[test]
     fn test_local_cache_ops() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
@@ -373,6 +375,8 @@ mod tests {
         Ok(())
     }
 
+    /// Tests that the Nix store path hash is correctly extracted from
+    /// standard valid path strings, and errors on invalid formats.
     #[test]
     fn test_extract_hash() -> Result<()> {
         let path = "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep";
