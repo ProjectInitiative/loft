@@ -161,8 +161,9 @@ impl S3Uploader {
                 for object in contents {
                     if let Some(key) = object.key {
                         if key.ends_with(".narinfo") {
-                            let processed_key = if key.starts_with("sha256:") {
-                                key[7..].to_string()
+                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:")
+                            {
+                                stripped.to_string()
                             } else {
                                 key
                             };
@@ -181,8 +182,6 @@ impl S3Uploader {
 
         Ok(all_keys)
     }
-
-    
 
     /// Uploads a file to S3, using multipart upload for large files.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {

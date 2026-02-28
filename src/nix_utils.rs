@@ -377,7 +377,7 @@ pub async fn upload_nar_for_path(
                     attempts,
                     e
                 );
-                let _ = sleep(Duration::from_secs(5));
+                sleep(Duration::from_secs(5)).await;
             }
         }
     }
@@ -477,7 +477,7 @@ pub async fn upload_nar_for_path(
                     attempts,
                     e
                 );
-                let _ = sleep(Duration::from_secs(5));
+                sleep(Duration::from_secs(5)).await;
             }
         }
     }
