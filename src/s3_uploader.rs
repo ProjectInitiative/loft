@@ -172,7 +172,10 @@ impl S3Uploader {
                             } else {
                                 key
                             };
-                            all_keys.push(processed_key);
+                            // Strip the .narinfo suffix to get the pure Nix hash
+                            if let Some(hash) = processed_key.strip_suffix(".narinfo") {
+                                all_keys.push(hash.to_string());
+                            }
                         }
                     }
                 }

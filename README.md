@@ -85,10 +85,6 @@ In your `configuration.nix` (or a related file), you can now enable and configur
     populateCacheOnStartup = false; # Populate local cache from S3 on startup
     compression = "zstd"; # "zstd" or "xz"
 
-    # --- Large NAR Handling ---
-    useDiskForLargeNars = true;
-    largeNarThresholdMb = 1024;
-
     # --- Path Signing ---
     signingKeyPath = "/path/to/your/nix-private-key";
     signingKeyName = "nix-cache";
@@ -141,8 +137,6 @@ upload_threads = 12
 scan_on_startup = true
 local_cache_path = ".direnv/cache.db"
 compression = "zstd"
-use_disk_for_large_nars = true
-large_nar_threshold_mb = 1024
 signing_key_path = "/run/secrets/nix-signing-key"
 signing_key_name = "nix-cache"
 skip_signed_by_keys = ["cache.nixos.org-1", "nix-community.cachix.org-1"]

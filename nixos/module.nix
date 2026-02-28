@@ -20,8 +20,6 @@ let
       upload_threads = cfg.uploadThreads;
       scan_on_startup = cfg.scanOnStartup;
       populate_cache_on_startup = cfg.populateCacheOnStartup;
-      use_disk_for_large_nars = cfg.useDiskForLargeNars;
-      large_nar_threshold_mb = cfg.largeNarThresholdMb;
       compression = cfg.compression;
       local_cache_path = cfg.localCachePath;
 
@@ -113,16 +111,6 @@ in
       default = [ "cache.nixos.org-1" "nix-community.cachix.org-1" ];
       example = literalExpression ''[ "cache.nixos.org-1" "nix-community.cachix.org-1" ]'';
       description = "List of public keys whose signed paths should be skipped for upload.";
-    };
-    useDiskForLargeNars = mkOption {
-      type = types.bool;
-      default = true;
-      description = "Use disk for large NARs instead of memory.";
-    };
-    largeNarThresholdMb = mkOption {
-      type = types.int;
-      default = 1024;
-      description = "The threshold in MB for what is considered a large NAR.";
     };
     compression = mkOption {
       type = types.enum [ "xz" "zstd" ];

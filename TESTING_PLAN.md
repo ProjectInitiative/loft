@@ -124,4 +124,4 @@ The integration test will execute the following sequence:
 ## Future Considerations
 
 *   **Load Testing**: Spinning up many small paths to test concurrency limits.
-*   **Large File Testing**: Verifying multipart upload for >1GB NARs (using `use_disk_for_large_nars`).
+*   **Large File Testing**: Verifying $O(1)$ memory streaming and multipart upload for very large NARs (ensuring memory stays capped at ~8MB part size).

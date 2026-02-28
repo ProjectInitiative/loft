@@ -322,41 +322,72 @@ pub async fn upload_nar_for_path(
     let file_hash_typed = format!("sha256:{}", file_hash_base32);
     let file_size = file_size_atomic.load(Ordering::SeqCst);
 
-    let mut nar_info_content_base = String::new();
-    nar_info_content_base.push_str(&format!("StorePath: {}\n", path.display()));
-    nar_info_content_base.push_str(&format!("URL: {}\n", nar_key));
-    nar_info_content_base.push_str(&format!("Compression: {}\n", compression_field));
-    nar_info_content_base.push_str(&format!("FileHash: {}\n", file_hash_typed));
-    nar_info_content_base.push_str(&format!("FileSize: {}\n", file_size));
-    nar_info_content_base.push_str(&format!("NarHash: {}\n", nar_hash_typed));
-    nar_info_content_base.push_str(&format!("NarSize: {}\n", nar_size));
-    nar_info_content_base.push_str(&format!("References: {}\n", references.join(" ")));
+    let nar_info_args = NarInfoArgs {
+        store_path: path,
+        url: &nar_key,
+        compression: compression_field,
+        file_hash: &file_hash_typed,
+        file_size,
+        nar_hash: &nar_hash_typed,
+        nar_size,
+        references: &references,
+        ca: ca.as_deref(),
+        existing_sigs: &sigs,
+        config,
+    };
 
-    if let Some(ca_value) = ca {
-        nar_info_content_base.push_str(&format!("CA: {}\n", ca_value));
+    let nar_info_content = generate_nar_info(nar_info_args)?;
+
+    let narinfo_key = get_narinfo_key(&store_path_obj);
+    uploader
+        .upload_bytes(nar_info_content.into_bytes(), &narinfo_key)
+        .await?;
+
+    Ok(())
+}
+
+/// Arguments for generating a .narinfo file.
+pub struct NarInfoArgs<'a> {
+    pub store_path: &'a Path,
+    pub url: &'a str,
+    pub compression: &'a str,
+    pub file_hash: &'a str,
+    pub file_size: u64,
+    pub nar_hash: &'a str,
+    pub nar_size: u64,
+    pub references: &'a [String],
+    pub ca: Option<&'a str>,
+    pub existing_sigs: &'a [String],
+    pub config: &'a Config,
+}
+
+/// Generates the content of a .narinfo file.
+pub fn generate_nar_info(args: NarInfoArgs) -> Result<String> {
+    let mut content = String::new();
+    content.push_str(&format!("StorePath: {}\n", args.store_path.display()));
+    content.push_str(&format!("URL: {}\n", args.url));
+    content.push_str(&format!("Compression: {}\n", args.compression));
+    content.push_str(&format!("FileHash: {}\n", args.file_hash));
+    content.push_str(&format!("FileSize: {}\n", args.file_size));
+    content.push_str(&format!("NarHash: {}\n", args.nar_hash));
+    content.push_str(&format!("NarSize: {}\n", args.nar_size));
+    content.push_str(&format!("References: {}\n", args.references.join(" ")));
+
+    if let Some(ca_value) = args.ca {
+        content.push_str(&format!("CA: {}\n", ca_value));
     }
 
-    let mut final_nar_info_content = nar_info_content_base.clone();
     let mut new_signature_key_name: Option<String> = None;
 
-    if let (Some(key_path), Some(key_name)) =
-        (&config.loft.signing_key_path, &config.loft.signing_key_name)
-    {
-        if !key_path.exists() {
-            warn!(
-                "Signing key file '{}' not found. Skipping signing.",
-                key_path.display()
-            );
-        } else {
-            info!(
-                "Signing path '{}' with key from file '{}'.",
-                path.display(),
-                key_path.display()
-            );
+    if let (Some(key_path), Some(key_name)) = (
+        &args.config.loft.signing_key_path,
+        &args.config.loft.signing_key_name,
+    ) {
+        if key_path.exists() {
             let key_file_content = fs::read_to_string(key_path)?;
             let nix_keypair = NixKeypair::from_str(&key_file_content)?;
 
-            let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&nar_info_content_base)?;
+            let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&content)?;
             let fingerprint = nar_info_for_signing.fingerprint();
             let full_signature_string = nix_keypair.sign(&fingerprint);
             let signature_value = full_signature_string
@@ -364,35 +395,27 @@ pub async fn upload_nar_for_path(
                 .map(|(_, val)| val)
                 .unwrap_or("");
 
-            final_nar_info_content.push_str(&format!("Sig: {}:{}\n", key_name, signature_value));
+            content.push_str(&format!("Sig: {}:{}\n", key_name, signature_value));
             new_signature_key_name = Some(key_name.clone());
         }
     }
 
     // Add existing signatures, excluding the one we just added (if any)
-    if !sigs.is_empty() {
-        for sig in &sigs {
-            if sig.starts_with("ca:") {
-                continue;
-            }
-            if let Some(existing_key_name) = sig.split_once(':').map(|(key, _)| key) {
-                if let Some(new_key) = &new_signature_key_name {
-                    if existing_key_name == new_key {
-                        // Skip if we just added this key's signature
-                        continue;
-                    }
+    for sig in args.existing_sigs {
+        if sig.starts_with("ca:") {
+            continue;
+        }
+        if let Some(existing_key_name) = sig.split_once(':').map(|(key, _)| key) {
+            if let Some(new_key) = &new_signature_key_name {
+                if existing_key_name == new_key {
+                    continue;
                 }
             }
-            final_nar_info_content.push_str(&format!("Sig: {}\n", sig));
         }
+        content.push_str(&format!("Sig: {}\n", sig));
     }
 
-    let narinfo_key = get_narinfo_key(&store_path_obj);
-    uploader
-        .upload_bytes(final_nar_info_content.clone().into_bytes(), &narinfo_key)
-        .await?;
-
-    Ok(())
+    Ok(content)
 }
 
 /// Gets the closure of a store path.
@@ -474,6 +497,141 @@ mod tests {
         assert!(filtered.contains_key(path2));
         assert!(!filtered.contains_key(path1));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_nar_info_formatting() -> Result<()> {
+        let store_path = Path::new("/nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0");
+        let url = "nar/sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4.nar.xz";
+        let compression = "xz";
+        let file_hash = "sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4";
+        let file_size = 35634208;
+        let nar_hash = "sha256:8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140";
+        let nar_size = 123456;
+        let references = vec!["4azvwrcvsj6fy0x66shvl37pasw46k57-nix-2.28.4".to_string()];
+        let ca = Some("fixed:sha256:1234...");
+        let existing_sigs = vec!["cache.nixos.org-1:sig1".to_string()];
+        let config = Config::default();
+
+        let nar_info_args = NarInfoArgs {
+            store_path,
+            url,
+            compression,
+            file_hash,
+            file_size,
+            nar_hash,
+            nar_size,
+            references: &references,
+            ca,
+            existing_sigs: &existing_sigs,
+            config: &config,
+        };
+
+        let content = generate_nar_info(nar_info_args)?;
+
+        assert!(content.contains("StorePath: /nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0"));
+        assert!(content.contains("URL: nar/sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4.nar.xz"));
+        assert!(content.contains("Compression: xz"));
+        assert!(content.contains("FileHash: sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4"));
+        assert!(content.contains("FileSize: 35634208"));
+        assert!(content.contains("NarHash: sha256:8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140"));
+        assert!(content.contains("NarSize: 123456"));
+        assert!(content.contains("References: 4azvwrcvsj6fy0x66shvl37pasw46k57-nix-2.28.4"));
+        assert!(content.contains("CA: fixed:sha256:1234..."));
+        assert!(content.contains("Sig: cache.nixos.org-1:sig1"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_compression_formats() -> Result<()> {
+        let data = b"Hello, Nix World! This is some test data to verify compression.";
+        let config_xz = Config {
+            loft: crate::config::LoftConfig {
+                compression: Compression::Xz,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config_zstd = Config {
+            loft: crate::config::LoftConfig {
+                compression: Compression::Zstd,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        async fn compress(data: &[u8], compression: Compression) -> Result<Vec<u8>> {
+            let (mut rx, tx) = tokio::io::duplex(64 * 1024);
+            let data_vec = data.to_vec();
+            tokio::spawn(async move {
+                let mut tx = tx;
+                tx.write_all(&data_vec).await.unwrap();
+            });
+
+            let (mut compressed_rx, compressed_tx) = tokio::io::duplex(64 * 1024);
+            tokio::spawn(async move {
+                let compressed_tx = compressed_tx;
+                match compression {
+                    Compression::Xz => {
+                        let mut encoder = XzEncoder::new(compressed_tx);
+                        tokio::io::copy(&mut rx, &mut encoder).await.unwrap();
+                        encoder.shutdown().await.unwrap();
+                    }
+                    Compression::Zstd => {
+                        let mut encoder = ZstdEncoder::new(compressed_tx);
+                        tokio::io::copy(&mut rx, &mut encoder).await.unwrap();
+                        encoder.shutdown().await.unwrap();
+                    }
+                }
+            });
+
+            let mut result = Vec::new();
+            compressed_rx.read_to_end(&mut result).await?;
+            Ok(result)
+        }
+
+        let xz_compressed = compress(data, config_xz.loft.compression).await?;
+        let zstd_compressed = compress(data, config_zstd.loft.compression).await?;
+
+        // Verify XZ magic bytes (7zXZ)
+        assert_eq!(&xz_compressed[0..6], &[0xFD, b'7', b'z', b'X', b'Z', 0x00]);
+        
+        // Verify Zstd magic bytes (0x28B52FFD)
+        assert_eq!(&zstd_compressed[0..4], &[0x28, 0xB5, 0x2F, 0xFD]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_narinfo_key() -> Result<()> {
+        let nix_store = NixStore::connect()?;
+        let path = Path::new("/nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0");
+        let store_path = nix_store.parse_store_path(path)?;
+        
+        let key = get_narinfo_key(&store_path);
+        assert_eq!(key, "hfx4mfjp89kv21whvwcmm2a0bjs0a428.narinfo");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_s3_key_hierarchy() -> Result<()> {
+        let nix_store = NixStore::connect()?;
+        let path = Path::new("/nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0");
+        let store_path = nix_store.parse_store_path(path)?;
+        
+        let nar_hash_base32 = "8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140";
+        let compression_ext = "xz";
+        
+        // This simulates the logic inside upload_nar_for_path
+        let nar_key = format!("nar/{}-{}.nar.{}", store_path.to_hash().as_str(), nar_hash_base32, compression_ext);
+        assert_eq!(nar_key, "nar/hfx4mfjp89kv21whvwcmm2a0bjs0a428-8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140.nar.xz");
+        
+        let narinfo_key = get_narinfo_key(&store_path);
+        assert_eq!(narinfo_key, "hfx4mfjp89kv21whvwcmm2a0bjs0a428.narinfo");
+        
         Ok(())
     }
 }

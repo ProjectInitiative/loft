@@ -39,7 +39,7 @@
       uploadThreads = 8;
       scanOnStartup = true;
       populateCacheOnStartup = true;
-      skipSignedByKeys = [ "test-exclude-key-1" ];
+      skipSignedByKeys = [ "test-exclude-key-1" "cache.nixos.org-1" ];
     };
 
     # We override the systemd service to NOT start automatically
