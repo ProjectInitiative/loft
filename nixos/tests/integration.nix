@@ -76,23 +76,38 @@
 
   testScript = ''
     import re
+    import tempfile
+    import os
 
-    def reset_state(env_vars):
+    # Helper to wrap commands with S3 credentials from files to avoid logging them
+    def with_s3(cmd):
+        return f"AWS_ACCESS_KEY_ID=$(cat /etc/loft-s3-access-key) AWS_SECRET_ACCESS_KEY=$(cat /etc/loft-s3-secret-key) AWS_DEFAULT_REGION=us-east-1 {cmd}"
+
+    def secure_copy(content, target):
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tf:
+            tf.write(content)
+            temp_name = tf.name
+        try:
+            machine.copy_from_host(temp_name, target)
+        finally:
+            os.remove(temp_name)
+
+    def reset_state():
         machine.log("Resetting Loft and S3 state...")
         machine.succeed("systemctl stop loft.service || true")
-        machine.succeed(env_vars + " aws --endpoint-url http://localhost:3900 s3 rm s3://loft-test-bucket --recursive || true")
+        machine.succeed(with_s3("aws --endpoint-url http://localhost:3900 s3 rm s3://loft-test-bucket --recursive || true"))
         machine.succeed("rm -f /var/lib/loft/cache.db")
         machine.log("State reset complete.")
 
-    def verify_cache(path, env_vars, s3_url, timeout=60):
+    def verify_cache(path, s3_url, timeout=60):
         machine.log("Waiting for path in S3 cache: " + path)
         hash_part = path.split("-")[0].split("/")[-1]
         narinfo = hash_part + ".narinfo"
         
-        machine.wait_until_succeeds(env_vars + " aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo, timeout=timeout)
+        machine.wait_until_succeeds(with_s3("aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo), timeout=timeout)
         
         machine.succeed("nix-store --delete --ignore-liveness " + path)
-        machine.succeed(env_vars + " nix build " + path + " --substituters '" + s3_url + "' --option require-sigs false --max-jobs 0")
+        machine.succeed(with_s3("nix build " + path + " --substituters '" + s3_url + "' --option require-sigs false --max-jobs 0"))
         machine.log("Verified: " + path + " is fetchable from S3")
 
     machine.start()
@@ -113,17 +128,19 @@
         if not ak_m or not sk_m: raise Exception("No keys")
         access_key = ak_m.group(1)
         secret_key = sk_m.group(1)
-        machine.succeed("echo -n '" + access_key + "' > /etc/loft-s3-access-key")
-        machine.succeed("echo -n '" + secret_key + "' > /etc/loft-s3-secret-key")
+        
+        # Write keys to files on the host and copy them to the VM to avoid logging them in command strings
+        secure_copy(access_key, "/etc/loft-s3-access-key")
+        secure_copy(secret_key, "/etc/loft-s3-secret-key")
+        
         machine.succeed("garage bucket create loft-test-bucket")
         machine.succeed("garage bucket allow loft-test-bucket --key test-key --read --write")
 
-    env_vars = "AWS_ACCESS_KEY_ID=" + access_key + " AWS_SECRET_ACCESS_KEY=" + secret_key + " AWS_DEFAULT_REGION=us-east-1"
     s3_url = "s3://loft-test-bucket?scheme=http&endpoint=localhost:3900&region=us-east-1"
 
-        # --- SUBTEST: Stress / Concurrency ---
+    # --- SUBTEST: Stress / Concurrency ---
     with subtest("Concurrency: 30 rapid path additions"):
-        reset_state(env_vars)
+        reset_state()
         machine.succeed("systemctl start loft.service")
         machine.wait_for_unit("loft.service", timeout=30)
         
@@ -139,11 +156,11 @@
         
         # Verify all 30 were processed
         for p in paths:
-            verify_cache(p, env_vars, s3_url, timeout=90)
+            verify_cache(p, s3_url, timeout=90)
 
     # --- SUBTEST: skipSignedByKeys ---
     with subtest("Config: skipSignedByKeys rejection"):
-        reset_state(env_vars)
+        reset_state()
         machine.succeed("systemctl start loft.service")
         
         # 1. Generate a key matching the excluded key name in config
@@ -160,18 +177,20 @@
         import time
         machine.log("Waiting to ensure signed path is NOT uploaded...")
         time.sleep(10)
-        machine.fail(env_vars + " aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo)
+        machine.fail(with_s3("aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo))
         machine.log("Verified: Path signed by excluded key was correctly skipped.")
 
     # --- SUBTEST: Pruning Verification ---
     with subtest("Service: Pruning verification"):
         # Use the manual config we created in subtest before (or recreate it)
         manual_config = "/tmp/prune-config.toml"
-        machine.succeed("cat > " + manual_config + " <<EOF\n" +
+        prune_config_content = (
             "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3900\"\n" +
             "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n" +
             "[loft]\nupload_threads = 1\nscan_on_startup = false\nlocal_cache_path = \"/tmp/prune-cache.db\"\n" +
-            "prune_enabled = true\nprune_retention_days = 30\nEOF")
+            "prune_enabled = true\nprune_retention_days = 30\n"
+        )
+        secure_copy(prune_config_content, manual_config)
         
         machine.log("Running manual prune...")
         machine.succeed("loft --config " + manual_config + " --prune")
@@ -179,4 +198,5 @@
 
     machine.log("All advanced integration tests passed!")
   '';
+  
 }
