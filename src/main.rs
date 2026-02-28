@@ -148,7 +148,11 @@ async fn main() -> Result<()> {
     // Handle manual pruning
     if args.prune {
         info!("Manually triggering pruning...");
-        let pruner = Pruner::new(uploader.clone(), Arc::new(config.clone()), local_cache.clone());
+        let pruner = Pruner::new(
+            uploader.clone(),
+            Arc::new(config.clone()),
+            local_cache.clone(),
+        );
         pruner.prune_old_objects().await?;
         info!("Manual pruning complete.");
         return Ok(()); // Exit after manual pruning
@@ -194,7 +198,8 @@ async fn main() -> Result<()> {
                 args.force_scan,
                 cancel_token,
             )
-            .await {
+            .await
+            {
                 error!("Watcher failed: {:?}", e);
             }
         }
@@ -207,7 +212,11 @@ async fn main() -> Result<()> {
             match parse_duration_string(&schedule_str) {
                 Ok(duration) => {
                     info!("Starting pruning task with schedule: {:?}", duration);
-                    let pruner = Pruner::new(uploader.clone(), Arc::new(config.clone()), local_cache.clone());
+                    let pruner = Pruner::new(
+                        uploader.clone(),
+                        Arc::new(config.clone()),
+                        local_cache.clone(),
+                    );
                     let pruner_cancel_token = cancel_token.clone();
                     pruner_handle = Some(tokio::spawn(async move {
                         loop {

@@ -265,7 +265,13 @@ mod tests {
 
         fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
             Box::pin(async move {
-                Ok(self.existing_paths.lock().unwrap().iter().cloned().collect())
+                Ok(self
+                    .existing_paths
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect())
             })
         }
     }
@@ -362,7 +368,7 @@ mod tests {
         assert_eq!(result.to_upload.len(), 1);
 
         // Verify local cache updated for path3
-        let local_hashes = local_cache.find_existing_hashes(&vec![hash3.to_string()])?;
+        let local_hashes = local_cache.find_existing_hashes(&[hash3.to_string()])?;
         assert!(local_hashes.contains(hash3));
 
         Ok(())

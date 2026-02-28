@@ -165,7 +165,8 @@ impl S3Uploader {
                 for object in contents {
                     if let Some(key) = object.key {
                         if key.ends_with(".narinfo") {
-                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:") {
+                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:")
+                            {
                                 stripped.to_string()
                             } else {
                                 key
@@ -229,7 +230,13 @@ impl S3Uploader {
             let mut file = match File::open(file_path).await {
                 Ok(f) => f,
                 Err(e) => {
-                    self.client.abort_multipart_upload().bucket(&self.bucket).key(key).upload_id(&upload_id).send().await?;
+                    self.client
+                        .abort_multipart_upload()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(&upload_id)
+                        .send()
+                        .await?;
                     return Err(e.into());
                 }
             };
@@ -283,7 +290,8 @@ impl S3Uploader {
                     .send()
                     .await?;
                 Ok(())
-            }.await;
+            }
+            .await;
 
             match upload_result {
                 Ok(_) => {
@@ -292,10 +300,20 @@ impl S3Uploader {
                         file_path.display(),
                         key
                     );
-                },
+                }
                 Err(e) => {
-                    warn!("Multipart upload failed for '{}'. Aborting...", file_path.display());
-                    let _ = self.client.abort_multipart_upload().bucket(&self.bucket).key(key).upload_id(&upload_id).send().await;
+                    warn!(
+                        "Multipart upload failed for '{}'. Aborting...",
+                        file_path.display()
+                    );
+                    let _ = self
+                        .client
+                        .abort_multipart_upload()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(&upload_id)
+                        .send()
+                        .await;
                     return Err(e);
                 }
             }
@@ -382,7 +400,8 @@ impl S3Uploader {
                     .send()
                     .await?;
                 Ok(())
-            }.await;
+            }
+            .await;
 
             match upload_result {
                 Ok(_) => {
@@ -390,10 +409,20 @@ impl S3Uploader {
                         "Successfully uploaded bytes to '{}' using multipart upload.",
                         key
                     );
-                },
+                }
                 Err(e) => {
-                    warn!("Multipart upload failed for bytes to '{}'. Aborting...", key);
-                    let _ = self.client.abort_multipart_upload().bucket(&self.bucket).key(key).upload_id(&upload_id).send().await;
+                    warn!(
+                        "Multipart upload failed for bytes to '{}'. Aborting...",
+                        key
+                    );
+                    let _ = self
+                        .client
+                        .abort_multipart_upload()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(&upload_id)
+                        .send()
+                        .await;
                     return Err(e);
                 }
             }

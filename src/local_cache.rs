@@ -413,7 +413,7 @@ mod tests {
     fn test_extract_hash() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let path = temp_file.path();
-        let cache = LocalCache::new(path)?;
+        let _cache = LocalCache::new(path)?;
 
         let path_str = "/nix/store/87gj1r21740364x1f5n3703dq5c08z83-helix-tree-sitter-bicep";
         let hash = LocalCache::extract_hash_from_path(path_str)?;

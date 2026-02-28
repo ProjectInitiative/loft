@@ -12,7 +12,7 @@ let
     pkg-config
   ];
 in
-craneLib.buildPackage {
+{
   inherit src;
   
   nativeBuildInputs = [ pkgs.pkg-config ];

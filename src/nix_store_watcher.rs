@@ -110,7 +110,8 @@ pub async fn scan_and_process_existing_paths(
 
             match rx.await {
                 Ok(Ok(_)) => {
-                    let path_hash = crate::local_cache::LocalCache::extract_hash_from_path(&path_str).unwrap();
+                    let path_hash =
+                        crate::local_cache::LocalCache::extract_hash_from_path(&path_str).unwrap();
                     if let Err(e) = local_cache_clone.add_path_hash(&path_hash) {
                         error!("Failed to add path {} to local cache: {:?}", path_str, e);
                     }
@@ -151,7 +152,7 @@ pub async fn watch_store(
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, NotifyError>| {
         if let Ok(event) = res {
             for path in event.paths {
-                if event.kind.is_remove() && path.extension().map_or(false, |e| e == "lock") {
+                if event.kind.is_remove() && path.extension().is_some_and(|e| e == "lock") {
                     if let Some(path_str) = path.to_str() {
                         let store_path = path_str.trim_end_matches(".lock");
                         info!("Detected new store path: {}", store_path);
@@ -205,7 +206,7 @@ pub async fn watch_store(
     }
 
     info!("Waiting for active uploads to finish...");
-    while let Some(_) = join_set.join_next().await {}
+    while (join_set.join_next().await).is_some() {}
 
     Ok(())
 }
@@ -280,7 +281,8 @@ pub async fn process_path(
 
         match rx.await {
             Ok(Ok(_)) => {
-                let path_hash = crate::local_cache::LocalCache::extract_hash_from_path(&path_str).unwrap();
+                let path_hash =
+                    crate::local_cache::LocalCache::extract_hash_from_path(&path_str).unwrap();
                 if let Err(e) = local_cache_clone.add_path_hash(&path_hash) {
                     error!("Failed to add path {} to local cache: {:?}", path_str, e);
                 }
