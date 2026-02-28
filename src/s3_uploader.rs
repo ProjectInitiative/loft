@@ -16,9 +16,9 @@ use chrono::{DateTime, Utc};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
+use crate::cache_checker::RemoteCacheStorage;
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
-use crate::cache_checker::RemoteCacheStorage;
 use futures::future::BoxFuture;
 
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
@@ -85,21 +85,23 @@ impl S3Uploader {
         let results = futures::stream::iter(store_paths.iter().cloned().map(|path_str| {
             let client = self.client.clone();
             let bucket = self.bucket.clone();
-            let nix_store = NixStore::connect().unwrap();
             let semaphore = semaphore.clone();
 
             async move {
                 let _permit = semaphore.acquire().await.expect("semaphore closed");
 
-                let store_path = match nix_store.parse_store_path(Path::new(&path_str)) {
-                    Ok(sp) => sp,
+                let hash = match crate::local_cache::LocalCache::extract_hash_from_path(&path_str) {
+                    Ok(h) => h,
                     Err(e) => {
-                        debug!("Failed to parse store path '{}': {}", path_str, e);
+                        debug!(
+                            "Failed to extract hash from store path '{}': {}",
+                            path_str, e
+                        );
                         return Err((path_str, e.to_string()));
                     }
                 };
 
-                let key = crate::nix_utils::get_narinfo_key(&store_path);
+                let key = format!("{}.narinfo", hash);
                 debug!("Checking S3 for key: {}", key);
 
                 match client.head_object().bucket(&bucket).key(&key).send().await {
@@ -183,8 +185,6 @@ impl S3Uploader {
 
         Ok(all_keys)
     }
-
-    
 
     /// Uploads a file to S3, using multipart upload for large files.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {
@@ -449,9 +449,7 @@ impl RemoteCacheStorage for S3Uploader {
         store_paths: &'a [String],
         max_concurrency: usize,
     ) -> BoxFuture<'a, Result<(Vec<String>, Vec<String>)>> {
-        Box::pin(async move {
-            self.check_paths_exist(store_paths, max_concurrency).await
-        })
+        Box::pin(async move { self.check_paths_exist(store_paths, max_concurrency).await })
     }
 }
 

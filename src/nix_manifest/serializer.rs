@@ -1,11 +1,12 @@
 //! The serializer.
-//! 
+//!
 //! A bulk of the serde data model is unsupported due to the restricted
 //! format.
 
 use serde::{ser, Serialize};
 
-use super::Error; use std::result::Result;
+use super::Error;
+use std::result::Result;
 
 pub struct Serializer {
     output: String,
@@ -112,7 +113,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Err(Error::NoneUnsupported)
     }
 
-    fn serialize_some<T>(self, value: &T) -> Result<(), Self::Error> 
+    fn serialize_some<T>(self, value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
@@ -137,22 +138,20 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Ok(self.serialize_str(variant)?)
     }
 
-    fn serialize_newtype_struct<T>(self, _name: &'static str, value: &T) -> Result<(), Self::Error> 
+    fn serialize_newtype_struct<T>(self, _name: &'static str, value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
         Ok(value.serialize(self)?)
     }
 
-    fn serialize_newtype_variant<
-        T,
-    >(
+    fn serialize_newtype_variant<T>(
         self,
         _name: &'static str,
         _variant_index: u32,
         _variant: &'static str,
         _value: &T,
-    ) -> Result<(), Self::Error> 
+    ) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
@@ -195,7 +194,11 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Ok(self)
     }
 
-    fn serialize_struct(self, _name: &'static str, len: usize) -> Result<Self::SerializeStruct, Self::Error> {
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
         Ok(self.serialize_map(Some(len))?)
     }
 
@@ -215,7 +218,7 @@ impl<'a> ser::SerializeSeq for &'a mut Serializer {
     type Error = Error;
 
     // Serialize a single element of the sequence.
-    fn serialize_element<T>(&mut self, _value: &T) -> Result<(), Self::Error> 
+    fn serialize_element<T>(&mut self, _value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
@@ -232,7 +235,7 @@ impl<'a> ser::SerializeTuple for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
 
-    fn serialize_element<T>(&mut self, _value: &T) -> Result<(), Self::Error> 
+    fn serialize_element<T>(&mut self, _value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
@@ -248,7 +251,7 @@ impl<'a> ser::SerializeTupleStruct for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
 
-    fn serialize_field<T>(&mut self, _value: &T) -> Result<(), Self::Error> 
+    fn serialize_field<T>(&mut self, _value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
@@ -264,7 +267,7 @@ impl<'a> ser::SerializeTupleVariant for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
 
-    fn serialize_field<T>(&mut self, _value: &T) -> Result<(), Self::Error> 
+    fn serialize_field<T>(&mut self, _value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
@@ -280,14 +283,14 @@ impl<'a> ser::SerializeMap for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
 
-    fn serialize_key<T>(&mut self, key: &T) -> Result<(), Self::Error> 
+    fn serialize_key<T>(&mut self, key: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
         Ok(key.serialize(&mut **self)?)
     }
 
-    fn serialize_value<T>(&mut self, value: &T) -> Result<(), Self::Error> 
+    fn serialize_value<T>(&mut self, value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
@@ -305,7 +308,7 @@ impl<'a> ser::SerializeStruct for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
 
-    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error> 
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {
@@ -325,7 +328,7 @@ impl<'a> ser::SerializeStructVariant for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
 
-    fn serialize_field<T>(&mut self, _key: &'static str, _value: &T) -> Result<(), Self::Error> 
+    fn serialize_field<T>(&mut self, _key: &'static str, _value: &T) -> Result<(), Self::Error>
     where
         T: ?Sized + Serialize,
     {

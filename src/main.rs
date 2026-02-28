@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
             "Clearing local cache at {}...",
             config.loft.local_cache_path.display()
         );
-        std::fs::remove_file(&config.loft.local_cache_path)?; // Modify this line
+        local_cache.clear()?;
         info!("Local cache cleared.");
         return Ok(());
     }
