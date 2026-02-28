@@ -136,12 +136,8 @@ impl Pruner {
     }
 
     fn remove_from_local_cache(&self, key: &str) {
-        if key.ends_with(".narinfo") {
-            let hash = if key.starts_with("sha256:") {
-                &key[7..key.len() - 8]
-            } else {
-                &key[..key.len() - 8]
-            };
+        if let Some(stripped) = key.strip_suffix(".narinfo") {
+            let hash = stripped.strip_prefix("sha256:").unwrap_or(stripped);
             if let Err(e) = self.local_cache.remove_hash(hash) {
                 error!("Failed to remove hash {} from local cache: {:?}", hash, e);
             } else {
