@@ -3,9 +3,7 @@ use futures::future::BoxFuture;
 use std::{collections::{HashMap, HashSet}, path::Path, sync::Arc};
 use tracing::{debug, info};
 
-use crate::local_cache::LocalCache;
-use crate::s3_uploader::S3Uploader;
-use attic::nix_store::{NixStore, ValidPathInfo};
+use attic::nix_store::NixStore;
 
 /// Trait for local cache storage operations.
 pub trait LocalCacheStorage: Send + Sync {
@@ -268,7 +266,32 @@ mod tests {
         let local_cache = Arc::new(MockLocalCache::new(vec![hash2.to_string()]));
         let remote_cache = Arc::new(MockRemoteCache::new(vec![path3.to_string()]));
         let nix_provider = MockNixHashProvider::new(hashes);
-        let config = crate::config::Config::default();
+        // We use a blank config here since we don't need real configuration
+        // for this test, just some default values to satisfy CacheChecker::new
+        let config = crate::config::Config {
+            s3: crate::config::S3Config {
+                endpoint: "".to_string(),
+                region: "".to_string(),
+                bucket: "".to_string(),
+                access_key: None,
+                secret_key: None,
+            },
+            loft: crate::config::LoftConfig {
+                local_cache_path: std::path::PathBuf::from(""),
+                signing_key_path: None,
+                signing_key_name: None,
+                upload_threads: 1,
+                skip_signed_by_keys: None,
+                large_nar_threshold_mb: 0,
+                use_disk_for_large_nars: false,
+                compression: crate::config::Compression::Zstd,
+                prune_enabled: false,
+                prune_schedule: None,
+                prune_max_age_days: 0,
+                scan_on_startup: false,
+                populate_cache_on_startup: false,
+            },
+        };
 
         let checker = CacheChecker::new(remote_cache, local_cache.clone(), config);
 
