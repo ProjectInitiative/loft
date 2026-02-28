@@ -1,5 +1,5 @@
 //! The deserializer.
-//! 
+//!
 //! This maps the manifest format into the serde data model.
 
 use std::ops::{AddAssign, MulAssign};
@@ -7,7 +7,8 @@ use std::ops::{AddAssign, MulAssign};
 use serde::de::{DeserializeSeed, IntoDeserializer, MapAccess, Visitor};
 use serde::{de, forward_to_deserialize_any};
 
-use super::Error; use std::result::Result;
+use super::Error;
+use std::result::Result;
 
 /// The main deserializer.
 pub struct Deserializer<'de> {
@@ -321,14 +322,22 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
         Err(Error::Unsupported("Unit"))
     }
 
-    fn deserialize_unit_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_unit_struct<V>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
         Ok(self.deserialize_unit(visitor)?)
     }
 
-    fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_newtype_struct<V>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
@@ -349,9 +358,12 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut ValueDeserializer<'a, 'de> {
         Ok(self.deserialize_seq(visitor)?)
     }
 
-    fn deserialize_tuple_struct<
-        V,
-    >(self, _name: &'static str, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_tuple_struct<V>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {

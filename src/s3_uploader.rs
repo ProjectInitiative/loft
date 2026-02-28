@@ -16,9 +16,9 @@ use chrono::{DateTime, Utc};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
+use crate::cache_checker::RemoteCacheStorage;
 use crate::config::S3Config;
 use attic::nix_store::NixStore;
-use crate::cache_checker::RemoteCacheStorage;
 use futures::future::BoxFuture;
 
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
@@ -55,7 +55,8 @@ impl S3Uploader {
                 None,
                 None,
                 "default",
-            ));
+            ))
+            .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(3));
 
         let sdk_config = config_loader.load().await;
 
@@ -163,8 +164,8 @@ impl S3Uploader {
                 for object in contents {
                     if let Some(key) = object.key {
                         if key.ends_with(".narinfo") {
-                            let processed_key = if key.starts_with("sha256:") {
-                                key[7..].to_string()
+                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:") {
+                                stripped.to_string()
                             } else {
                                 key
                             };
@@ -183,8 +184,6 @@ impl S3Uploader {
 
         Ok(all_keys)
     }
-
-    
 
     /// Uploads a file to S3, using multipart upload for large files.
     pub async fn upload_file(&self, file_path: &Path, key: &str) -> Result<()> {
@@ -449,9 +448,7 @@ impl RemoteCacheStorage for S3Uploader {
         store_paths: &'a [String],
         max_concurrency: usize,
     ) -> BoxFuture<'a, Result<(Vec<String>, Vec<String>)>> {
-        Box::pin(async move {
-            self.check_paths_exist(store_paths, max_concurrency).await
-        })
+        Box::pin(async move { self.check_paths_exist(store_paths, max_concurrency).await })
     }
 }
 

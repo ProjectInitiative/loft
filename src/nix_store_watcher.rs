@@ -41,7 +41,7 @@ pub async fn scan_and_process_existing_paths(
 
     // 2. Get the closure of the filtered paths
     let all_closure_paths: HashSet<String> =
-        match nix::get_store_paths_closure(filtered_paths_vec).await {
+        match nix::get_store_paths_closure(&filtered_paths_vec).await {
             Ok(paths) => paths.into_iter().collect(),
             Err(e) => {
                 error!("Failed to get closures: {:?}", e);
@@ -50,25 +50,33 @@ pub async fn scan_and_process_existing_paths(
         };
     info!("Total unique closure paths: {}", all_closure_paths.len());
 
-    // 3. Get signatures for the closure and filter again
-    let closure_signatures =
-        nix::get_path_signatures(all_closure_paths.into_iter().collect()).await?;
+    let all_closure_vec: Vec<String> = all_closure_paths.into_iter().collect();
+
+    // 3. Check caches (local + remote) BEFORE fetching signatures for the whole closure
+    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
+    let mut result = checker
+        .check_paths(&nix_store, &all_closure_vec, force_scan)
+        .await?;
+
+    if result.to_upload.is_empty() {
+        info!("No missing paths to upload.");
+        return Ok(());
+    }
+
+    // 4. Get signatures for only the MISSING closure paths and filter again
+    let closure_signatures = nix::get_path_signatures(&result.to_upload).await?;
     let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
     let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
     info!(
-        "Total paths after filtering closure: {}",
+        "Total paths after filtering missing closure paths: {}",
         filtered_closure_vec.len()
     );
 
-    // 4. Check caches (local + remote)
-    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
-    let result = checker
-        .check_paths(&nix_store, filtered_closure_vec, force_scan)
-        .await?;
+    result.to_upload = filtered_closure_vec;
 
-    // 3. Upload missing
+    // 5. Upload missing
     if result.to_upload.is_empty() {
-        info!("No missing paths to upload.");
+        info!("No missing paths to upload after signature filtering.");
         return Ok(());
     }
 
@@ -81,8 +89,8 @@ pub async fn scan_and_process_existing_paths(
         let local_cache_clone = local_cache.clone();
         let config_clone = config.clone();
         let semaphore_clone = semaphore.clone();
+        let permit = semaphore_clone.acquire_owned().await.unwrap();
         tasks.push(tokio::spawn(async move {
-            let permit = semaphore_clone.acquire_owned().await.unwrap();
             let (tx, rx) = oneshot::channel();
 
             let p = Path::new(&path_str).to_path_buf();
@@ -168,8 +176,8 @@ pub async fn watch_store(
         let local_cache_clone = local_cache.clone();
         let semaphore_clone = semaphore.clone();
         let config_for_task = config.clone(); // Clone config for the spawned task
+        let permit = semaphore_clone.acquire_owned().await.unwrap();
         tokio::spawn(async move {
-            let permit = semaphore_clone.acquire_owned().await.unwrap();
             if let Err(e) = process_path(
                 uploader_clone,
                 local_cache_clone,
@@ -200,7 +208,7 @@ pub async fn process_path(
 
     // 1. Filter the path
     let keys_to_skip = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
-    let sigs_map = nix::get_path_signatures(vec![path_str.clone()]).await?;
+    let sigs_map = nix::get_path_signatures(std::slice::from_ref(&path_str)).await?;
     let filtered_paths = nix::filter_out_sig_keys(sigs_map, keys_to_skip.clone()).await?;
 
     if filtered_paths.is_empty() {
@@ -211,22 +219,29 @@ pub async fn process_path(
     // 2. Get closure
     let closure = nix::get_store_path_closure(&path_str).await?;
 
-    // 3. Get signatures for the closure and filter again
-    let closure_signatures = nix::get_path_signatures(closure.into_iter().collect()).await?;
+    // 3. Check caches BEFORE fetching signatures
+    let nix_store = NixStore::connect()?;
+    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
+    let mut result = checker
+        .check_paths(&nix_store, &closure, force_scan)
+        .await?;
+
+    if result.to_upload.is_empty() {
+        info!("No missing paths to upload for {}.", path.display());
+        return Ok(());
+    }
+
+    // 4. Get signatures for only the MISSING closure paths and filter again
+    let closure_signatures = nix::get_path_signatures(&result.to_upload).await?;
     let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
     let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
     info!(
-        "Total paths after filtering closure for {}: {}",
+        "Total paths after filtering missing closure for {}: {}",
         path.display(),
         filtered_closure_vec.len()
     );
 
-    // 4. Check caches
-    let nix_store = NixStore::connect()?;
-    let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
-    let result = checker
-        .check_paths(&nix_store, filtered_closure_vec, force_scan)
-        .await?;
+    result.to_upload = filtered_closure_vec;
 
     // 5. Upload missing
     for path_str in result.to_upload {

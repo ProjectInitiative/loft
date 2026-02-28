@@ -1,6 +1,10 @@
 use anyhow::Result;
 use futures::future::BoxFuture;
-use std::{collections::{HashMap, HashSet}, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 use tracing::{debug, info};
 
 use attic::nix_store::NixStore;
@@ -82,7 +86,7 @@ impl CacheChecker {
     pub async fn check_paths(
         &self,
         nix_provider: &dyn NixHashProvider,
-        paths: Vec<String>,
+        paths: &[String],
         force_scan: bool,
     ) -> Result<CacheCheckResult> {
         if paths.is_empty() {
@@ -92,7 +96,7 @@ impl CacheChecker {
             });
         }
 
-        let hashes_map = nix_provider.get_hashes(&paths).await?;
+        let hashes_map = nix_provider.get_hashes(paths).await?;
         let hashes: Vec<String> = paths
             .iter()
             .map(|p| hashes_map.get(p).cloned().unwrap_or_default())
@@ -100,17 +104,18 @@ impl CacheChecker {
 
         // 1. Local cache check
         let missing_paths: Vec<String> = if force_scan {
-            paths.clone()
+            paths.to_vec()
         } else {
             let existing = self.local_cache.find_existing_hashes(&hashes)?;
             info!("Local cache already has {} entries", existing.len());
 
             paths
-                .into_iter()
-                .filter(|p| {
+                .iter()
+                .filter(|&p| {
                     let h = hashes_map.get(p).unwrap();
                     !existing.contains(h)
                 })
+                .cloned()
                 .collect()
         };
 
@@ -302,7 +307,7 @@ mod tests {
 
         let paths = vec![path1.to_string(), path2.to_string(), path3.to_string()];
 
-        let result = checker.check_paths(&nix_provider, paths, false).await?;
+        let result = checker.check_paths(&nix_provider, &paths, false).await?;
 
         // path2 is locally cached -> ignored
         // path3 is remotely cached -> should be added to local cache, not uploaded
@@ -336,15 +341,34 @@ mod tests {
         let nix_provider = MockNixHashProvider::new(hashes);
         let config = crate::config::Config {
             s3: crate::config::S3Config {
-                endpoint: "".to_string(), region: "".to_string(), bucket: "".to_string(), access_key: None, secret_key: None,
+                endpoint: "".to_string(),
+                region: "".to_string(),
+                bucket: "".to_string(),
+                access_key: None,
+                secret_key: None,
             },
             loft: crate::config::LoftConfig {
-                local_cache_path: std::path::PathBuf::from(""), signing_key_path: None, signing_key_name: None, upload_threads: 1, skip_signed_by_keys: None, large_nar_threshold_mb: 0, use_disk_for_large_nars: false, compression: crate::config::Compression::Zstd, prune_enabled: false, prune_schedule: None, prune_retention_days: 30, prune_max_size_gb: None, prune_target_percentage: Some(90), scan_on_startup: false, populate_cache_on_startup: false,
+                local_cache_path: std::path::PathBuf::from(""),
+                signing_key_path: None,
+                signing_key_name: None,
+                upload_threads: 1,
+                skip_signed_by_keys: None,
+                large_nar_threshold_mb: 0,
+                use_disk_for_large_nars: false,
+                compression: crate::config::Compression::Zstd,
+                prune_enabled: false,
+                prune_schedule: None,
+                prune_retention_days: 30,
+                prune_max_size_gb: None,
+                prune_target_percentage: Some(90),
+                scan_on_startup: false,
+                populate_cache_on_startup: false,
             },
         };
 
         let checker = CacheChecker::new(remote_cache, local_cache, config);
-        let result = checker.check_paths(&nix_provider, vec![path1.to_string()], false).await?;
+        let paths = vec![path1.to_string()];
+        let result = checker.check_paths(&nix_provider, &paths, false).await?;
 
         assert!(result.to_upload.is_empty());
         Ok(())
@@ -365,17 +389,36 @@ mod tests {
         let nix_provider = MockNixHashProvider::new(hashes);
         let config = crate::config::Config {
             s3: crate::config::S3Config {
-                endpoint: "".to_string(), region: "".to_string(), bucket: "".to_string(), access_key: None, secret_key: None,
+                endpoint: "".to_string(),
+                region: "".to_string(),
+                bucket: "".to_string(),
+                access_key: None,
+                secret_key: None,
             },
             loft: crate::config::LoftConfig {
-                local_cache_path: std::path::PathBuf::from(""), signing_key_path: None, signing_key_name: None, upload_threads: 1, skip_signed_by_keys: None, large_nar_threshold_mb: 0, use_disk_for_large_nars: false, compression: crate::config::Compression::Zstd, prune_enabled: false, prune_schedule: None, prune_retention_days: 30, prune_max_size_gb: None, prune_target_percentage: Some(90), scan_on_startup: false, populate_cache_on_startup: false,
+                local_cache_path: std::path::PathBuf::from(""),
+                signing_key_path: None,
+                signing_key_name: None,
+                upload_threads: 1,
+                skip_signed_by_keys: None,
+                large_nar_threshold_mb: 0,
+                use_disk_for_large_nars: false,
+                compression: crate::config::Compression::Zstd,
+                prune_enabled: false,
+                prune_schedule: None,
+                prune_retention_days: 30,
+                prune_max_size_gb: None,
+                prune_target_percentage: Some(90),
+                scan_on_startup: false,
+                populate_cache_on_startup: false,
             },
         };
 
         let checker = CacheChecker::new(remote_cache, local_cache, config);
 
         // ...using force_scan = true will cause it to query remote, see it's missing, and return it for upload.
-        let result = checker.check_paths(&nix_provider, vec![path1.to_string()], true).await?;
+        let paths = vec![path1.to_string()];
+        let result = checker.check_paths(&nix_provider, &paths, true).await?;
 
         assert_eq!(result.to_upload, vec![path1.to_string()]);
         Ok(())
