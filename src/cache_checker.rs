@@ -1,30 +1,74 @@
 use anyhow::Result;
-
-use std::{collections::HashMap, path::Path, sync::Arc};
+use futures::future::BoxFuture;
+use std::{collections::{HashMap, HashSet}, path::Path, sync::Arc};
 use tracing::{debug, info};
 
-use crate::local_cache::LocalCache;
-use crate::s3_uploader::S3Uploader;
-use attic::nix_store::{NixStore, ValidPathInfo};
+use attic::nix_store::NixStore;
+
+/// Trait for local cache storage operations.
+pub trait LocalCacheStorage: Send + Sync {
+    fn find_existing_hashes(&self, hashes: &[String]) -> Result<HashSet<String>>;
+    fn add_many_path_hashes(&self, hashes: &[String]) -> Result<()>;
+}
+
+/// Trait for remote cache storage operations.
+pub trait RemoteCacheStorage: Send + Sync {
+    fn check_paths_exist<'a>(
+        &'a self,
+        store_paths: &'a [String],
+        max_concurrency: usize,
+    ) -> BoxFuture<'a, Result<(Vec<String>, Vec<String>)>>;
+}
+
+/// Trait for providing Nix path hashes.
+pub trait NixHashProvider: Send + Sync {
+    fn get_hashes<'a>(
+        &'a self,
+        paths: &'a [String],
+    ) -> BoxFuture<'a, Result<HashMap<String, String>>>;
+}
+
+impl NixHashProvider for NixStore {
+    fn get_hashes<'a>(
+        &'a self,
+        paths: &'a [String],
+    ) -> BoxFuture<'a, Result<HashMap<String, String>>> {
+        Box::pin(async move {
+            let mut map = HashMap::new();
+            for p in paths {
+                let store_path = self.parse_store_path(Path::new(p))?;
+                let info = self.query_path_info(store_path).await?;
+                let hash = info
+                    .nar_hash
+                    .to_typed_base32()
+                    .strip_prefix("sha256:")
+                    .unwrap_or_default()
+                    .to_string();
+                map.insert(p.clone(), hash);
+            }
+            Ok(map)
+        })
+    }
+}
 
 /// The result of checking paths against local + remote caches.
 pub struct CacheCheckResult {
-    /// Paths that must still be uploaded, with their `ValidPathInfo`.
-    pub to_upload: Vec<(String, Arc<ValidPathInfo>)>,
+    /// Paths that must still be uploaded.
+    pub to_upload: Vec<String>,
     /// Hashes that were already cached locally (for bookkeeping).
     pub already_cached: Vec<String>,
 }
 
 pub struct CacheChecker {
-    uploader: Arc<S3Uploader>,
-    local_cache: Arc<LocalCache>,
+    uploader: Arc<dyn RemoteCacheStorage>,
+    local_cache: Arc<dyn LocalCacheStorage>,
     config: crate::config::Config,
 }
 
 impl CacheChecker {
     pub fn new(
-        uploader: Arc<S3Uploader>,
-        local_cache: Arc<LocalCache>,
+        uploader: Arc<dyn RemoteCacheStorage>,
+        local_cache: Arc<dyn LocalCacheStorage>,
         config: crate::config::Config,
     ) -> Self {
         Self {
@@ -34,36 +78,10 @@ impl CacheChecker {
         }
     }
 
-    /// Normalize paths → hashes + infos.
-    async fn get_infos_and_hashes(
-        &self,
-        nix_store: &NixStore,
-        paths: &[String],
-    ) -> Result<(Vec<String>, HashMap<String, Arc<ValidPathInfo>>)> {
-        let mut hashes = Vec::new();
-        let mut infos = HashMap::new();
-
-        for p in paths {
-            let store_path = nix_store.parse_store_path(Path::new(p))?;
-            let info = nix_store.query_path_info(store_path).await?;
-            let plain_hash = info
-                .nar_hash
-                .to_typed_base32()
-                .strip_prefix("sha256:")
-                .unwrap_or_default()
-                .to_string();
-
-            hashes.push(plain_hash.clone());
-            infos.insert(p.clone(), Arc::new(info));
-        }
-
-        Ok((hashes, infos))
-    }
-
     /// Full check: local → remote → upload candidates.
     pub async fn check_paths(
         &self,
-        nix_store: &NixStore,
+        nix_provider: &dyn NixHashProvider,
         paths: Vec<String>,
         force_scan: bool,
     ) -> Result<CacheCheckResult> {
@@ -74,7 +92,11 @@ impl CacheChecker {
             });
         }
 
-        let (hashes, infos) = self.get_infos_and_hashes(nix_store, &paths).await?;
+        let hashes_map = nix_provider.get_hashes(&paths).await?;
+        let hashes: Vec<String> = paths
+            .iter()
+            .map(|p| hashes_map.get(p).cloned().unwrap_or_default())
+            .collect();
 
         // 1. Local cache check
         let missing_paths: Vec<String> = if force_scan {
@@ -86,13 +108,8 @@ impl CacheChecker {
             paths
                 .into_iter()
                 .filter(|p| {
-                    let h = infos[p]
-                        .nar_hash
-                        .to_typed_base32()
-                        .strip_prefix("sha256:")
-                        .unwrap_or_default()
-                        .to_string();
-                    !existing.contains(&h)
+                    let h = hashes_map.get(p).unwrap();
+                    !existing.contains(h)
                 })
                 .collect()
         };
@@ -116,27 +133,251 @@ impl CacheChecker {
         if !found_remote.is_empty() {
             let mut to_add = Vec::new();
             for p in &found_remote {
-                let h = infos[p]
-                    .nar_hash
-                    .to_typed_base32()
-                    .strip_prefix("sha256:")
-                    .unwrap_or_default()
-                    .to_string();
-                to_add.push(h);
+                if let Some(h) = hashes_map.get(p) {
+                    to_add.push(h.clone());
+                }
             }
             self.local_cache.add_many_path_hashes(&to_add)?;
         }
 
         // 3. Prepare upload list
-        let mut to_upload = Vec::new();
-        for p in missing_remote {
-            let info = infos.get(&p).unwrap().clone();
-            to_upload.push((p, info));
-        }
-
+        // missing_remote contains paths that are not in remote cache.
+        // We just return them.
         Ok(CacheCheckResult {
-            to_upload,
+            to_upload: missing_remote,
             already_cached: hashes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct MockLocalCache {
+        existing_hashes: Mutex<HashSet<String>>,
+    }
+
+    impl MockLocalCache {
+        fn new(hashes: Vec<String>) -> Self {
+            Self {
+                existing_hashes: Mutex::new(hashes.into_iter().collect()),
+            }
+        }
+    }
+
+    impl LocalCacheStorage for MockLocalCache {
+        fn find_existing_hashes(&self, hashes: &[String]) -> Result<HashSet<String>> {
+            let store = self.existing_hashes.lock().unwrap();
+            let mut result = HashSet::new();
+            for h in hashes {
+                if store.contains(h) {
+                    result.insert(h.clone());
+                }
+            }
+            Ok(result)
+        }
+
+        fn add_many_path_hashes(&self, hashes: &[String]) -> Result<()> {
+            let mut store = self.existing_hashes.lock().unwrap();
+            for h in hashes {
+                store.insert(h.clone());
+            }
+            Ok(())
+        }
+    }
+
+    struct MockRemoteCache {
+        existing_paths: Mutex<HashSet<String>>,
+    }
+
+    impl MockRemoteCache {
+        fn new(paths: Vec<String>) -> Self {
+            Self {
+                existing_paths: Mutex::new(paths.into_iter().collect()),
+            }
+        }
+    }
+
+    impl RemoteCacheStorage for MockRemoteCache {
+        fn check_paths_exist<'a>(
+            &'a self,
+            store_paths: &'a [String],
+            _max_concurrency: usize,
+        ) -> BoxFuture<'a, Result<(Vec<String>, Vec<String>)>> {
+            Box::pin(async move {
+                let store = self.existing_paths.lock().unwrap();
+                let mut missing = Vec::new();
+                let mut found = Vec::new();
+                for p in store_paths {
+                    if store.contains(p) {
+                        found.push(p.clone());
+                    } else {
+                        missing.push(p.clone());
+                    }
+                }
+                Ok((missing, found))
+            })
+        }
+    }
+
+    struct MockNixHashProvider {
+        hashes: HashMap<String, String>,
+    }
+
+    impl MockNixHashProvider {
+        fn new(hashes: HashMap<String, String>) -> Self {
+            Self { hashes }
+        }
+    }
+
+    impl NixHashProvider for MockNixHashProvider {
+        fn get_hashes<'a>(
+            &'a self,
+            paths: &'a [String],
+        ) -> BoxFuture<'a, Result<HashMap<String, String>>> {
+            Box::pin(async move {
+                let mut map = HashMap::new();
+                for p in paths {
+                    if let Some(h) = self.hashes.get(p) {
+                        map.insert(p.clone(), h.clone());
+                    }
+                }
+                Ok(map)
+            })
+        }
+    }
+
+    /// Tests that the logic for checking paths properly queries both the local
+    /// and remote caches. Ensures paths only locally cached are ignored, paths
+    /// remotely cached are skipped but added locally, and uncached paths are returned.
+    #[tokio::test]
+    async fn test_check_paths_logic() -> Result<()> {
+        let path1 = "/nix/store/path1";
+        let hash1 = "hash1";
+        let path2 = "/nix/store/path2";
+        let hash2 = "hash2"; // cached locally
+        let path3 = "/nix/store/path3";
+        let hash3 = "hash3"; // cached remotely
+
+        let mut hashes = HashMap::new();
+        hashes.insert(path1.to_string(), hash1.to_string());
+        hashes.insert(path2.to_string(), hash2.to_string());
+        hashes.insert(path3.to_string(), hash3.to_string());
+
+        let local_cache = Arc::new(MockLocalCache::new(vec![hash2.to_string()]));
+        let remote_cache = Arc::new(MockRemoteCache::new(vec![path3.to_string()]));
+        let nix_provider = MockNixHashProvider::new(hashes);
+        // We use a blank config here since we don't need real configuration
+        // for this test, just some default values to satisfy CacheChecker::new
+        let config = crate::config::Config {
+            s3: crate::config::S3Config {
+                endpoint: "".to_string(),
+                region: "".to_string(),
+                bucket: "".to_string(),
+                access_key: None,
+                secret_key: None,
+            },
+            loft: crate::config::LoftConfig {
+                local_cache_path: std::path::PathBuf::from(""),
+                signing_key_path: None,
+                signing_key_name: None,
+                upload_threads: 1,
+                skip_signed_by_keys: None,
+                large_nar_threshold_mb: 0,
+                use_disk_for_large_nars: false,
+                compression: crate::config::Compression::Zstd,
+                prune_enabled: false,
+                prune_schedule: None,
+                prune_retention_days: 30,
+                prune_max_size_gb: None,
+                prune_target_percentage: Some(90),
+                scan_on_startup: false,
+                populate_cache_on_startup: false,
+            },
+        };
+
+        let checker = CacheChecker::new(remote_cache, local_cache.clone(), config);
+
+        let paths = vec![path1.to_string(), path2.to_string(), path3.to_string()];
+
+        let result = checker.check_paths(&nix_provider, paths, false).await?;
+
+        // path2 is locally cached -> ignored
+        // path3 is remotely cached -> should be added to local cache, not uploaded
+        // path1 is nowhere -> should be uploaded
+
+        assert!(result.to_upload.contains(&path1.to_string()));
+        assert!(!result.to_upload.contains(&path2.to_string()));
+        assert!(!result.to_upload.contains(&path3.to_string()));
+        assert_eq!(result.to_upload.len(), 1);
+
+        // Verify local cache updated for path3
+        let local_hashes = local_cache.find_existing_hashes(&vec![hash3.to_string()])?;
+        assert!(local_hashes.contains(hash3));
+
+        Ok(())
+    }
+
+    /// Tests that when all paths are already in the local cache,
+    /// the method immediately returns an empty upload list without
+    /// querying the remote cache.
+    #[tokio::test]
+    async fn test_check_paths_all_local() -> Result<()> {
+        let path1 = "/nix/store/path1";
+        let hash1 = "hash1";
+
+        let mut hashes = HashMap::new();
+        hashes.insert(path1.to_string(), hash1.to_string());
+
+        let local_cache = Arc::new(MockLocalCache::new(vec![hash1.to_string()]));
+        let remote_cache = Arc::new(MockRemoteCache::new(vec![]));
+        let nix_provider = MockNixHashProvider::new(hashes);
+        let config = crate::config::Config {
+            s3: crate::config::S3Config {
+                endpoint: "".to_string(), region: "".to_string(), bucket: "".to_string(), access_key: None, secret_key: None,
+            },
+            loft: crate::config::LoftConfig {
+                local_cache_path: std::path::PathBuf::from(""), signing_key_path: None, signing_key_name: None, upload_threads: 1, skip_signed_by_keys: None, large_nar_threshold_mb: 0, use_disk_for_large_nars: false, compression: crate::config::Compression::Zstd, prune_enabled: false, prune_schedule: None, prune_retention_days: 30, prune_max_size_gb: None, prune_target_percentage: Some(90), scan_on_startup: false, populate_cache_on_startup: false,
+            },
+        };
+
+        let checker = CacheChecker::new(remote_cache, local_cache, config);
+        let result = checker.check_paths(&nix_provider, vec![path1.to_string()], false).await?;
+
+        assert!(result.to_upload.is_empty());
+        Ok(())
+    }
+
+    /// Tests that when `force_scan` is true, the local cache check is bypassed.
+    #[tokio::test]
+    async fn test_check_paths_force_scan() -> Result<()> {
+        let path1 = "/nix/store/path1";
+        let hash1 = "hash1";
+
+        let mut hashes = HashMap::new();
+        hashes.insert(path1.to_string(), hash1.to_string());
+
+        // Even though hash1 is locally cached...
+        let local_cache = Arc::new(MockLocalCache::new(vec![hash1.to_string()]));
+        let remote_cache = Arc::new(MockRemoteCache::new(vec![])); // but NOT remotely cached
+        let nix_provider = MockNixHashProvider::new(hashes);
+        let config = crate::config::Config {
+            s3: crate::config::S3Config {
+                endpoint: "".to_string(), region: "".to_string(), bucket: "".to_string(), access_key: None, secret_key: None,
+            },
+            loft: crate::config::LoftConfig {
+                local_cache_path: std::path::PathBuf::from(""), signing_key_path: None, signing_key_name: None, upload_threads: 1, skip_signed_by_keys: None, large_nar_threshold_mb: 0, use_disk_for_large_nars: false, compression: crate::config::Compression::Zstd, prune_enabled: false, prune_schedule: None, prune_retention_days: 30, prune_max_size_gb: None, prune_target_percentage: Some(90), scan_on_startup: false, populate_cache_on_startup: false,
+            },
+        };
+
+        let checker = CacheChecker::new(remote_cache, local_cache, config);
+
+        // ...using force_scan = true will cause it to query remote, see it's missing, and return it for upload.
+        let result = checker.check_paths(&nix_provider, vec![path1.to_string()], true).await?;
+
+        assert_eq!(result.to_upload, vec![path1.to_string()]);
+        Ok(())
     }
 }
