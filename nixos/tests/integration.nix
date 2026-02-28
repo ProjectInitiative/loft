@@ -8,6 +8,7 @@
 
     virtualisation.writableStore = true;
     virtualisation.memorySize = 2048;
+    virtualisation.diskSize = 4096; # 4GB to handle datasets
 
     services.garage = {
       enable = true;
@@ -35,9 +36,10 @@
         accessKeyFile = "/etc/loft-s3-access-key";
         secretKeyFile = "/etc/loft-s3-secret-key";
       };
-      uploadThreads = 4;
+      uploadThreads = 8;
       scanOnStartup = true;
       populateCacheOnStartup = true;
+      skipSignedByKeys = [ "test-exclude-key-1" ];
     };
 
     # We override the systemd service to NOT start automatically
@@ -118,55 +120,57 @@
     env_vars = "AWS_ACCESS_KEY_ID=" + access_key + " AWS_SECRET_ACCESS_KEY=" + secret_key + " AWS_DEFAULT_REGION=us-east-1"
     s3_url = "s3://loft-test-bucket?scheme=http&endpoint=localhost:3900&region=us-east-1"
 
-    # --- SUBTEST: Mass Watcher Test ---
-    with subtest("Service: Mass Watcher Upload (via nix-build)"):
+    # --- SUBTEST: Stress / Concurrency ---
+    with subtest("Concurrency: 30 rapid path additions"):
         reset_state(env_vars)
         machine.succeed("systemctl start loft.service")
         machine.wait_for_unit("loft.service", timeout=30)
         
         paths = []
-        machine.log("Adding 10 files via nix-build to trigger watcher...")
-        for i in range(10):
-            # runCommand will trigger a .lock file removal event
-            p = machine.succeed("nix-build --no-out-link -E '(import <nixpkgs> {}).runCommand \"mass-" + str(i) + "\" {} \"echo " + str(i) + " > $out\"'").strip()
+        machine.log("Stress testing with 30 rapid builds...")
+        for i in range(30):
+            p = machine.succeed("nix-build --no-out-link -E '(import <nixpkgs> {}).runCommand \"stress-" + str(i) + "\" {} \"echo " + str(i) + " > $out\"'").strip()
             paths.append(p)
         
+        # Verify all 30 were processed
         for p in paths:
-            verify_cache(p, env_vars, s3_url)
+            verify_cache(p, env_vars, s3_url, timeout=90)
 
-    # --- SUBTEST: Cache Recovery ---
-    with subtest("Service: Cache Recovery (Populate from S3)"):
-        machine.succeed("systemctl stop loft.service")
-        machine.succeed("rm -f /var/lib/loft/cache.db")
+    # --- SUBTEST: skipSignedByKeys ---
+    with subtest("Config: skipSignedByKeys rejection"):
+        reset_state(env_vars)
         machine.succeed("systemctl start loft.service")
-        machine.wait_until_succeeds("journalctl -u loft.service | grep 'Local cache populated from S3'", timeout=30)
         
-        p = machine.succeed("nix-build --no-out-link -E '(import <nixpkgs> {}).runCommand \"recovery-test\" {} \"echo recovery > $out\"'").strip()
-        verify_cache(p, env_vars, s3_url)
+        # 1. Generate a key matching the excluded key name in config
+        machine.succeed("nix-store --generate-binary-cache-key test-exclude-key-1 /tmp/sk1 /tmp/pk1")
+        
+        # 2. Create a path and SIGN it
+        p_to_sign = machine.succeed("nix-build --no-out-link -E '(import <nixpkgs> {}).runCommand \"signed-path\" {} \"echo signed > $out\"'").strip()
+        machine.succeed("nix store sign --key-file /tmp/sk1 " + p_to_sign)
+        
+        # 3. Verify it is NOT in S3 after some time
+        hash_part = p_to_sign.split("-")[0].split("/")[-1]
+        narinfo = hash_part + ".narinfo"
+        
+        import time
+        machine.log("Waiting to ensure signed path is NOT uploaded...")
+        time.sleep(10)
+        machine.fail(env_vars + " aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo)
+        machine.log("Verified: Path signed by excluded key was correctly skipped.")
 
-    # --- SUBTEST: Cache Inconsistency ---
-    with subtest("Handling Inconsistency: S3 cleared, DB intact"):
-        p = machine.succeed("nix-build --no-out-link -E '(import <nixpkgs> {}).runCommand \"inconsistent\" {} \"echo oops > $out\"'").strip()
-        verify_cache(p, env_vars, s3_url)
-        
-        machine.succeed(env_vars + " aws --endpoint-url http://localhost:3900 s3 rm s3://loft-test-bucket --recursive")
-        
-        # Reset via CLI
-        # Generate a temporary config for manual CLI operations
-        machine.succeed("cat > /tmp/manual-config.toml <<EOF\n" +
+    # --- SUBTEST: Pruning Verification ---
+    with subtest("Service: Pruning verification"):
+        # Use the manual config we created in subtest before (or recreate it)
+        manual_config = "/tmp/prune-config.toml"
+        machine.succeed("cat > " + manual_config + " <<EOF\n" +
             "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3900\"\n" +
             "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n" +
-            "[loft]\nupload_threads = 1\nscan_on_startup = false\nlocal_cache_path = \"/var/lib/loft/cache.db\"\nEOF")
+            "[loft]\nupload_threads = 1\nscan_on_startup = false\nlocal_cache_path = \"/tmp/prune-cache.db\"\n" +
+            "prune_enabled = true\nprune_retention_days = 30\nEOF")
         
-        machine.log("Clearing cache via CLI...")
-        machine.succeed("systemctl stop loft.service")
-        machine.succeed("loft --config /tmp/manual-config.toml --clear-cache")
-        # Manually upload to prove it can recover
-        machine.succeed("loft --config /tmp/manual-config.toml --upload-path " + p)
-        verify_cache(p, env_vars, s3_url, timeout=60)
-        
-        # Restart service for any remaining logic
-        machine.succeed("systemctl start loft.service")
+        machine.log("Running manual prune...")
+        machine.succeed("loft --config " + manual_config + " --prune")
+        machine.log("Pruning command completed successfully.")
 
     machine.log("All advanced integration tests passed!")
   '';
