@@ -55,6 +55,7 @@
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
       trusted-users = [ "root" ];
+      substituters = [];
     };
     
     # Ensure we have a dummy nixpkgs available for nix-build
@@ -120,17 +121,21 @@
     env_vars = "AWS_ACCESS_KEY_ID=" + access_key + " AWS_SECRET_ACCESS_KEY=" + secret_key + " AWS_DEFAULT_REGION=us-east-1"
     s3_url = "s3://loft-test-bucket?scheme=http&endpoint=localhost:3900&region=us-east-1"
 
-    # --- SUBTEST: Stress / Concurrency ---
+        # --- SUBTEST: Stress / Concurrency ---
     with subtest("Concurrency: 30 rapid path additions"):
         reset_state(env_vars)
         machine.succeed("systemctl start loft.service")
         machine.wait_for_unit("loft.service", timeout=30)
         
-        paths = []
         machine.log("Stress testing with 30 rapid builds...")
-        for i in range(30):
-            p = machine.succeed("nix-build --no-out-link -E '(import <nixpkgs> {}).runCommand \"stress-" + str(i) + "\" {} \"echo " + str(i) + " > $out\"'").strip()
-            paths.append(p)
+        # Launch 30 nix-build processes in parallel inside the VM
+        machine.succeed("mkdir -p /tmp/stress")
+        machine.succeed(
+            "for i in {0..29}; do "
+            "  nix-build --no-out-link -E \"(import <nixpkgs> {}).runCommand \\\"stress-$i\\\" {} \\\"echo $i > \$out\\\"\" > /tmp/stress/$i & "
+            "done; wait"
+        )
+        paths = machine.succeed("cat /tmp/stress/*").strip().splitlines()
         
         # Verify all 30 were processed
         for p in paths:

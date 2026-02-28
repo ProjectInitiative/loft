@@ -8,24 +8,19 @@ use std::path::Path;
 use futures::stream::StreamExt;
 use serde_json::Value;
 
-use std::io::{Read, Write};
 use std::sync::Arc;
-use tempfile::NamedTempFile;
-use tokio::io::AsyncWriteExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
-use xz2::read::XzEncoder;
-use zstd::stream::write::Encoder as ZstdEncoder;
 
-use attic::hash::Hash;
 use attic::nix_store::NixStore; // Keep NixStore
 use attic::signing::NixKeypair; // Added this line
 
 use crate::config::{Compression, Config};
 use crate::nix_manifest::{self, NarInfo};
 use crate::s3_uploader::S3Uploader;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine;
 use nix_base32;
 
 #[derive(Debug, Clone)]
@@ -92,7 +87,11 @@ fn parse_path_signatures_from_json(json_str: &str) -> Result<HashMap<String, Vec
 }
 
 pub async fn get_all_path_signatures() -> Result<HashMap<String, Vec<Signature>>> {
-    info!("Fetching and parsing all path signatures...");
+    // Note: Since NixStore doesn't expose queryAllValidPaths directly in FFI yet,
+    // we might still need the CLI for this specific bulk operation, 
+    // or we can iterate if we have a list of paths.
+    // For now, let's keep the CLI for get_all_path_signatures but use NixStore for individual lookups.
+    info!("Fetching and parsing all path signatures using nix CLI...");
     let output = Command::new("nix")
         .arg("path-info")
         .arg("--sigs")
@@ -115,27 +114,50 @@ pub async fn get_all_path_signatures() -> Result<HashMap<String, Vec<Signature>>
 
 pub async fn get_path_signatures(paths: &[String]) -> Result<HashMap<String, Vec<Signature>>> {
     info!(
-        "Fetching and parsing signatures for {} paths...",
+        "Fetching and parsing signatures for {} paths using NixStore...",
         paths.len()
     );
 
-    let mut cmd = Command::new("nix");
-    cmd.arg("path-info").arg("--sigs").arg("--json");
+    let nix_store = Arc::new(NixStore::connect()?);
+    let mut tasks = Vec::new();
 
-    // Add each path as a separate argument
-    for path in paths {
-        cmd.arg(path);
+    for path_str in paths {
+        let path_str = path_str.clone();
+        let nix_store_clone = nix_store.clone();
+        tasks.push(tokio::spawn(async move {
+            let store_path_obj = nix_store_clone.parse_store_path(Path::new(&path_str))?;
+            match nix_store_clone.query_path_info(store_path_obj).await {
+                Ok(path_info) => {
+                    let mut signatures = Vec::new();
+                    for sig_str in path_info.sigs {
+                        if sig_str.starts_with("ca:") {
+                            signatures.push(Signature::ContentAddressed {
+                                full_info: sig_str,
+                            });
+                        } else if let Some((key, signature)) = sig_str.split_once(':') {
+                            signatures.push(Signature::Crypto {
+                                key_name: key.to_string(),
+                                signature: signature.to_string(),
+                            });
+                        }
+                    }
+                    Ok::<_, anyhow::Error>(Some((path_str, signatures)))
+                }
+                Err(e) => {
+                    warn!("Failed to query path info for {}: {:?}", path_str, e);
+                    Ok(None)
+                }
+            }
+        }));
     }
 
-    let output = cmd.output().await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("nix path-info failed: {}", stderr));
+    let mut path_signatures = HashMap::new();
+    let results = futures::future::join_all(tasks).await;
+    for res in results {
+        if let Some((path, sigs)) = res?? {
+            path_signatures.insert(path, sigs);
+        }
     }
-
-    let stdout = String::from_utf8(output.stdout)?;
-    let path_signatures = parse_path_signatures_from_json(&stdout)?;
 
     info!("Done. Found info for {} paths.", path_signatures.len());
     Ok(path_signatures)
@@ -187,11 +209,13 @@ pub async fn dump_nar_to_bytes(store_path: &Path) -> Result<Vec<u8>> {
 
     let mut nar_bytes = Vec::new();
     while let Some(chunk) = adapter.next().await {
-        nar_bytes.extend_from_slice(chunk?.as_slice()); // Fixed this line
+        nar_bytes.extend_from_slice(chunk?.as_slice());
     }
 
     Ok(nar_bytes)
 }
+
+use async_compression::tokio::write::{XzEncoder, ZstdEncoder};
 
 /// Uploads the NAR and .narinfo for a given store path.
 pub async fn upload_nar_for_path(
@@ -199,188 +223,114 @@ pub async fn upload_nar_for_path(
     path: &Path,
     config: &Config,
 ) -> Result<()> {
-    let output = Command::new("nix")
-        .arg("path-info")
-        .arg("--json")
-        .arg(path)
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "nix path-info failed for {}: {}",
-            path.display(),
-            stderr
-        ));
-    }
-
-    let stdout = String::from_utf8(output.stdout)?;
-    let json: Value = serde_json::from_str(&stdout)?;
-    let path_info_json = &json[path.to_str().unwrap()];
-
-    if path_info_json.is_null() {
-        return Err(anyhow!("Path {} not found in nix store", path.display()));
-    }
-
-    let ca = path_info_json["ca"].as_str().map(|s| s.to_string());
-    let deriver = path_info_json["deriver"].as_str().map(|s| s.to_string());
-    let nar_hash_sri = path_info_json["narHash"].as_str().unwrap();
-    let nar_size = path_info_json["narSize"].as_u64().unwrap();
-    let references_json = path_info_json["references"].as_array().unwrap();
-    let sigs: Vec<String> = path_info_json["signatures"]
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .map(|s| s.as_str().unwrap().to_string())
-        .collect();
-
-    let nar_hash_base64 = nar_hash_sri.strip_prefix("sha256-").unwrap();
-    let nar_hash_bytes = BASE64_STANDARD.decode(nar_hash_base64)?;
-    let nar_hash_base32 = nix_base32::to_nix_base32(&nar_hash_bytes);
-    let nar_hash_typed = format!("sha256:{}", nar_hash_base32);
-
-    let references: Vec<String> = references_json
-        .iter()
-        .map(|r| {
-            let full_path = r.as_str().unwrap();
-            Path::new(full_path)
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
-
     let nix_store = NixStore::connect()?;
     let store_path_obj = nix_store.parse_store_path(path)?;
 
-    let use_disk = config.loft.use_disk_for_large_nars
-        && (nar_size / 1024 / 1024) >= config.loft.large_nar_threshold_mb;
+    let path_info = nix_store.query_path_info(store_path_obj.clone()).await?;
+
+    let ca = path_info.ca;
+    let nar_hash_typed = path_info.nar_hash.to_typed_base32();
+    let nar_size = path_info.nar_size;
+    let sigs = path_info.sigs;
+
+    let references: Vec<String> = path_info.references
+        .iter()
+        .map(|r| {
+            r.file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or_else(|| r.to_str().unwrap_or(""))
+                .to_string()
+        })
+        .collect();
 
     let (compression_ext, compression_field) = match config.loft.compression {
         Compression::Xz => ("xz", "xz"),
         Compression::Zstd => ("zst", "zstd"),
     };
 
-    let (compressed_nar_bytes, nar_key) = if use_disk {
-        info!(
-            "Path '{}' is large, using on-disk NAR creation.",
-            path.display()
-        );
+    // Streaming NAR dump and compression
+    let (mut rx, mut tx) = tokio::io::duplex(64 * 1024);
+    let mut adapter = nix_store.nar_from_path(store_path_obj.clone());
 
-        let nar_temp_file = NamedTempFile::new()?;
-        let mut nar_file = tokio::fs::File::create(nar_temp_file.path()).await?;
-        let mut adapter = nix_store.nar_from_path(store_path_obj.clone());
+    let nar_dump_task = tokio::spawn(async move {
         while let Some(chunk) = adapter.next().await {
-            nar_file.write_all(chunk?.as_slice()).await?;
+            tx.write_all(chunk?.as_slice()).await?;
         }
-        info!("Created NAR for '{}' on disk.", path.display());
+        Ok::<(), anyhow::Error>(())
+    });
 
-        let compressed_temp_file = NamedTempFile::new()?;
-        let compressed_path = compressed_temp_file.path().to_path_buf();
-        let nar_path = nar_temp_file.path().to_path_buf();
-        let compression_type = config.loft.compression;
+    let (mut compressed_rx, compressed_tx) = tokio::io::duplex(64 * 1024);
+    let compression_type = config.loft.compression;
 
-        tokio::task::spawn_blocking(move || {
-            let compressed_file = std::fs::File::create(compressed_path)?;
-            let mut compressed_writer = std::io::BufWriter::new(compressed_file);
-
-            match compression_type {
-                Compression::Xz => {
-                    let nar_file = std::fs::File::open(&nar_path)?;
-                    let mut encoder = XzEncoder::new(nar_file, 6);
-                    std::io::copy(&mut encoder, &mut compressed_writer)?;
-                }
-                Compression::Zstd => {
-                    let mut nar_file = std::fs::File::open(&nar_path)?;
-                    let mut encoder = ZstdEncoder::new(compressed_writer, 0)?;
-                    std::io::copy(&mut nar_file, &mut encoder)?;
-                    encoder.finish()?;
-                }
+    // We need to calculate FileHash (of compressed data) and FileSize.
+    // For FileHash and FileSize, we unfortunately need to see the whole compressed stream.
+    // However, we can still stream the upload. We'll capture the hash and size as we stream to S3.
+    
+    let compression_task = tokio::spawn(async move {
+        match compression_type {
+            Compression::Xz => {
+                let mut encoder = XzEncoder::new(compressed_tx);
+                tokio::io::copy(&mut rx, &mut encoder).await?;
+                encoder.shutdown().await?;
             }
-            Ok::<(), anyhow::Error>(())
-        })
-        .await??;
-        info!(
-            "Compressed NAR for '{}' on disk with {:?}.",
-            path.display(),
-            config.loft.compression
-        );
+            Compression::Zstd => {
+                let mut encoder = ZstdEncoder::new(compressed_tx);
+                tokio::io::copy(&mut rx, &mut encoder).await?;
+                encoder.shutdown().await?;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    });
 
-        let compressed_bytes = tokio::fs::read(compressed_temp_file.path()).await?;
-        let file_hash = Hash::sha256_from_bytes(&compressed_bytes);
-        let nar_key = format!(
-            "nar/{}.nar.{}",
-            file_hash.to_typed_base32().strip_prefix("sha256:").unwrap(),
-            compression_ext
-        );
+    // Stream to S3 and calculate hash/size on the fly
+    use sha2::{Digest, Sha256};
+    let hasher = Arc::new(Mutex::new(Sha256::new()));
+    let file_size_atomic = Arc::new(AtomicU64::new(0));
 
-        (compressed_bytes, nar_key)
-    } else {
-        let nar_bytes = dump_nar_to_bytes(path).await?;
-        info!("Created NAR for '{}' in memory.", path.display());
-
-        let config_clone = config.clone();
-        let compressed_nar_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-            let compressed_bytes = match config_clone.loft.compression {
-                Compression::Xz => {
-                    let mut encoder = XzEncoder::new(&nar_bytes[..], 6);
-                    let mut compressed = Vec::new();
-                    encoder.read_to_end(&mut compressed)?;
-                    Ok(compressed)
-                }
-                Compression::Zstd => {
-                    let compressed = Vec::new();
-                    let mut encoder = ZstdEncoder::new(compressed, 0)?;
-                    encoder.write_all(&nar_bytes[..])?;
-                    encoder.finish()
-                }
-            }?;
-            Ok(compressed_bytes)
-        })
-        .await??;
-        info!(
-            "Compressed NAR for '{}' with {:?}.",
-            path.display(),
-            config.loft.compression
-        );
-
-        let file_hash = Hash::sha256_from_bytes(&compressed_nar_bytes);
-        let nar_key = format!(
-            "nar/{}.nar.{}",
-            file_hash.to_typed_base32().strip_prefix("sha256:").unwrap(),
-            compression_ext
-        );
-
-        (compressed_nar_bytes, nar_key)
+    let hasher_clone = hasher.clone();
+    let file_size_clone = file_size_atomic.clone();
+    
+    // We'll use a predictable NAR key (like store path hash + nar hash) and calculate FileHash during upload.
+    let stream = async_stream::try_stream! {
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let n = compressed_rx.read(&mut buffer).await.map_err(|e| anyhow::anyhow!(e))?;
+            if n == 0 { break; }
+            let chunk = &buffer[..n];
+            
+            {
+                let mut h = hasher_clone.lock().await;
+                h.update(chunk);
+            }
+            file_size_clone.fetch_add(n as u64, Ordering::SeqCst);
+            
+            yield bytes::Bytes::copy_from_slice(chunk);
+        }
     };
 
-    uploader
-        .upload_bytes(compressed_nar_bytes.clone(), &nar_key)
-        .await?;
+    let nar_key = format!("nar/{}-{}.nar.{}", store_path_obj.to_hash().as_str(), nar_hash_typed.strip_prefix("sha256:").unwrap(), compression_ext);
 
-    let file_hash = Hash::sha256_from_bytes(&compressed_nar_bytes);
-    let file_size = compressed_nar_bytes.len();
+    uploader.upload_stream(stream, &nar_key).await?;
+
+    let _ = tokio::try_join!(nar_dump_task, compression_task)?;
+
+    let file_hash_bytes = {
+        let h = hasher.lock().await;
+        h.clone().finalize()
+    };
+    let file_hash_base32 = nix_base32::to_nix_base32(&file_hash_bytes);
+    let file_hash_typed = format!("sha256:{}", file_hash_base32);
+    let file_size = file_size_atomic.load(Ordering::SeqCst);
 
     let mut nar_info_content_base = String::new();
     nar_info_content_base.push_str(&format!("StorePath: {}\n", path.display()));
     nar_info_content_base.push_str(&format!("URL: {}\n", nar_key));
     nar_info_content_base.push_str(&format!("Compression: {}\n", compression_field));
-    nar_info_content_base.push_str(&format!("FileHash: {}\n", file_hash.to_typed_base32()));
+    nar_info_content_base.push_str(&format!("FileHash: {}\n", file_hash_typed));
     nar_info_content_base.push_str(&format!("FileSize: {}\n", file_size));
     nar_info_content_base.push_str(&format!("NarHash: {}\n", nar_hash_typed));
     nar_info_content_base.push_str(&format!("NarSize: {}\n", nar_size));
     nar_info_content_base.push_str(&format!("References: {}\n", references.join(" ")));
-
-    if let Some(deriver_path) = deriver {
-        let deriver_basename = Path::new(&deriver_path)
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or(&deriver_path);
-        nar_info_content_base.push_str(&format!("Deriver: {}\n", deriver_basename));
-    }
 
     if let Some(ca_value) = ca {
         nar_info_content_base.push_str(&format!("CA: {}\n", ca_value));

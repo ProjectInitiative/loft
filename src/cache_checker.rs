@@ -41,17 +41,27 @@ impl NixHashProvider for NixStore {
         paths: &'a [String],
     ) -> BoxFuture<'a, Result<HashMap<String, String>>> {
         Box::pin(async move {
-            let mut map = HashMap::new();
+            let mut tasks = Vec::new();
             for p in paths {
-                let store_path = self.parse_store_path(Path::new(p))?;
-                let info = self.query_path_info(store_path).await?;
-                let hash = info
-                    .nar_hash
-                    .to_typed_base32()
-                    .strip_prefix("sha256:")
-                    .unwrap_or_default()
-                    .to_string();
-                map.insert(p.clone(), hash);
+                let p = p.clone();
+                tasks.push(async move {
+                    let store_path = self.parse_store_path(Path::new(&p))?;
+                    let info = self.query_path_info(store_path).await?;
+                    let hash = info
+                        .nar_hash
+                        .to_typed_base32()
+                        .strip_prefix("sha256:")
+                        .unwrap_or_default()
+                        .to_string();
+                    Ok::<_, anyhow::Error>((p, hash))
+                });
+            }
+
+            let results = futures::future::join_all(tasks).await;
+            let mut map = HashMap::new();
+            for res in results {
+                let (p, hash) = res?;
+                map.insert(p, hash);
             }
             Ok(map)
         })
