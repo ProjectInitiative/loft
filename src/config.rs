@@ -86,7 +86,7 @@ pub struct S3Config {
 
 /// Sets the default number of upload threads if not specified.
 fn default_upload_threads() -> usize {
-    4
+    32
 }
 
 /// Sets the default NAR size threshold in MB.
