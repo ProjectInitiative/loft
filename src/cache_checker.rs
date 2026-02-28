@@ -89,7 +89,7 @@ impl CacheChecker {
     pub async fn check_paths(
         &self,
         nix_provider: &dyn NixHashProvider,
-        paths: Vec<String>,
+        paths: &[String],
         force_scan: bool,
     ) -> Result<CacheCheckResult> {
         if paths.is_empty() {
@@ -104,9 +104,15 @@ impl CacheChecker {
             info!("Local cache scan is not complete. Fetching all remote hashes to warm up local cache...");
             match self.uploader.list_all_hashes().await {
                 Ok(remote_hashes) => {
-                    info!("Found {} remote hashes during warmup. Populating local cache...", remote_hashes.len());
+                    info!(
+                        "Found {} remote hashes during warmup. Populating local cache...",
+                        remote_hashes.len()
+                    );
                     if let Err(e) = self.local_cache.add_many_path_hashes(&remote_hashes) {
-                        tracing::warn!("Failed to add remote hashes to local cache during warmup: {}", e);
+                        tracing::warn!(
+                            "Failed to add remote hashes to local cache during warmup: {}",
+                            e
+                        );
                     } else if let Err(e) = self.local_cache.set_scan_complete() {
                         tracing::warn!("Failed to mark scan as complete: {}", e);
                     } else {
@@ -119,7 +125,7 @@ impl CacheChecker {
             }
         }
 
-        let hashes_map = nix_provider.get_hashes(&paths).await?;
+        let hashes_map = nix_provider.get_hashes(paths).await?;
         let hashes: Vec<String> = paths
             .iter()
             .map(|p| hashes_map.get(p).cloned().unwrap_or_default())
@@ -127,17 +133,18 @@ impl CacheChecker {
 
         // 1. Local cache check
         let missing_paths: Vec<String> = if force_scan {
-            paths.clone()
+            paths.to_vec()
         } else {
             let existing = self.local_cache.find_existing_hashes(&hashes)?;
             info!("Local cache already has {} entries", existing.len());
 
             paths
-                .into_iter()
-                .filter(|p| {
+                .iter()
+                .filter(|&p| {
                     let h = hashes_map.get(p).unwrap();
                     !existing.contains(h)
                 })
+                .cloned()
                 .collect()
         };
 
@@ -343,7 +350,7 @@ mod tests {
 
         let paths = vec![path1.to_string(), path2.to_string(), path3.to_string()];
 
-        let result = checker.check_paths(&nix_provider, paths, false).await?;
+        let result = checker.check_paths(&nix_provider, &paths, false).await?;
 
         // path2 is locally cached -> ignored
         // path3 is remotely cached -> should be added to local cache, not uploaded
@@ -403,9 +410,8 @@ mod tests {
         };
 
         let checker = CacheChecker::new(remote_cache, local_cache, config);
-        let result = checker
-            .check_paths(&nix_provider, vec![path1.to_string()], false)
-            .await?;
+        let paths = vec![path1.to_string()];
+        let result = checker.check_paths(&nix_provider, &paths, false).await?;
 
         assert!(result.to_upload.is_empty());
         Ok(())
@@ -454,9 +460,8 @@ mod tests {
         let checker = CacheChecker::new(remote_cache, local_cache, config);
 
         // ...using force_scan = true will cause it to query remote, see it's missing, and return it for upload.
-        let result = checker
-            .check_paths(&nix_provider, vec![path1.to_string()], true)
-            .await?;
+        let paths = vec![path1.to_string()];
+        let result = checker.check_paths(&nix_provider, &paths, true).await?;
 
         assert_eq!(result.to_upload, vec![path1.to_string()]);
         Ok(())

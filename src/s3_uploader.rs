@@ -54,7 +54,8 @@ impl S3Uploader {
                 None,
                 None,
                 "default",
-            ));
+            ))
+            .retry_config(aws_config::retry::RetryConfig::standard().with_max_attempts(3));
 
         let sdk_config = config_loader.load().await;
 
@@ -164,8 +165,8 @@ impl S3Uploader {
                 for object in contents {
                     if let Some(key) = object.key {
                         if key.ends_with(".narinfo") {
-                            let processed_key = if key.starts_with("sha256:") {
-                                key[7..].to_string()
+                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:") {
+                                stripped.to_string()
                             } else {
                                 key
                             };
@@ -482,9 +483,7 @@ impl RemoteCacheStorage for S3Uploader {
     }
 
     fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
-        Box::pin(async move {
-            self.list_all_narinfo_keys().await
-        })
+        Box::pin(async move { self.list_all_narinfo_keys().await })
     }
 }
 

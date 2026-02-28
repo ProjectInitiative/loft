@@ -10,11 +10,9 @@ use serde_json::Value;
 
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::time::sleep;
 use tracing::{info, warn};
 use xz2::read::XzEncoder;
 use zstd::stream::write::Encoder as ZstdEncoder;
@@ -115,7 +113,7 @@ pub async fn get_all_path_signatures() -> Result<HashMap<String, Vec<Signature>>
     Ok(path_signatures)
 }
 
-pub async fn get_path_signatures(paths: Vec<String>) -> Result<HashMap<String, Vec<Signature>>> {
+pub async fn get_path_signatures(paths: &[String]) -> Result<HashMap<String, Vec<Signature>>> {
     info!(
         "Fetching and parsing signatures for {} paths...",
         paths.len()
@@ -125,7 +123,7 @@ pub async fn get_path_signatures(paths: Vec<String>) -> Result<HashMap<String, V
     cmd.arg("path-info").arg("--sigs").arg("--json");
 
     // Add each path as a separate argument
-    for path in &paths {
+    for path in paths {
         cmd.arg(path);
     }
 
@@ -158,11 +156,11 @@ pub async fn get_path_signature_key(store_path: &str) -> Result<Option<String>> 
 }
 
 /// Gets the closure of a set of store paths.
-pub async fn get_store_paths_closure(store_paths: Vec<String>) -> Result<Vec<String>> {
+pub async fn get_store_paths_closure(store_paths: &[String]) -> Result<Vec<String>> {
     let nix_store = NixStore::connect()?;
     let mut store_path_objs = Vec::new();
     for path_str in store_paths {
-        store_path_objs.push(nix_store.parse_store_path(Path::new(&path_str))?);
+        store_path_objs.push(nix_store.parse_store_path(Path::new(path_str))?);
     }
 
     let closure_paths = nix_store
@@ -359,28 +357,9 @@ pub async fn upload_nar_for_path(
         (compressed_nar_bytes, nar_key)
     };
 
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        match uploader
-            .upload_bytes(compressed_nar_bytes.clone(), &nar_key)
-            .await
-        {
-            Ok(_) => break,
-            Err(e) => {
-                if attempts >= 3 {
-                    return Err(e);
-                }
-                warn!(
-                    "Failed to upload NAR for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
-                    path.display(),
-                    attempts,
-                    e
-                );
-                let _ = sleep(Duration::from_secs(5));
-            }
-        }
-    }
+    uploader
+        .upload_bytes(compressed_nar_bytes.clone(), &nar_key)
+        .await?;
 
     let file_hash = Hash::sha256_from_bytes(&compressed_nar_bytes);
     let file_size = compressed_nar_bytes.len();
@@ -459,35 +438,16 @@ pub async fn upload_nar_for_path(
     }
 
     let narinfo_key = get_narinfo_key(&store_path_obj);
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        match uploader
-            .upload_bytes(final_nar_info_content.clone().into_bytes(), &narinfo_key)
-            .await
-        {
-            Ok(_) => break,
-            Err(e) => {
-                if attempts >= 3 {
-                    return Err(e);
-                }
-                warn!(
-                    "Failed to upload .narinfo for '{}' (attempt {}/3): {:?}. Retrying in 5 seconds...",
-                    path.display(),
-                    attempts,
-                    e
-                );
-                let _ = sleep(Duration::from_secs(5));
-            }
-        }
-    }
+    uploader
+        .upload_bytes(final_nar_info_content.clone().into_bytes(), &narinfo_key)
+        .await?;
 
     Ok(())
 }
 
 /// Gets the closure of a store path.
 pub async fn get_store_path_closure(store_path: &str) -> Result<Vec<String>> {
-    get_store_paths_closure(vec![store_path.to_string()]).await
+    get_store_paths_closure(&[store_path.to_string()]).await
 }
 
 #[cfg(test)]
