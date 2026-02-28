@@ -5,15 +5,17 @@ use std::sync::Arc;
 
 use crate::s3_uploader::{S3Uploader, AwsDateTimeExt};
 use crate::config::Config;
+use crate::local_cache::LocalCache;
 
 pub struct Pruner {
     uploader: Arc<S3Uploader>,
     config: Arc<Config>,
+    local_cache: Arc<LocalCache>,
 }
 
 impl Pruner {
-    pub fn new(uploader: Arc<S3Uploader>, config: Arc<Config>) -> Self {
-        Self { uploader, config }
+    pub fn new(uploader: Arc<S3Uploader>, config: Arc<Config>, local_cache: Arc<LocalCache>) -> Self {
+        Self { uploader, config, local_cache }
     }
 
     pub async fn prune_old_objects(&self) -> Result<()> {
@@ -65,6 +67,18 @@ impl Pruner {
                     debug!("Pruning object by size: {} (Size: {})", key, size);
                     match self.uploader.delete_object(&key).await {
                         Ok(_) => {
+                            if key.ends_with(".narinfo") {
+                                let hash = if key.starts_with("sha256:") {
+                                    &key[7..key.len() - 8]
+                                } else {
+                                    &key[..key.len() - 8]
+                                };
+                                if let Err(e) = self.local_cache.remove_hash(hash) {
+                                    error!("Failed to remove hash {} from local cache: {:?}", hash, e);
+                                } else {
+                                    debug!("Removed hash {} from local cache after pruning", hash);
+                                }
+                            }
                             total_pruned_count += 1;
                             current_bucket_size_bytes -= size;
                         },
@@ -99,6 +113,18 @@ impl Pruner {
                                 debug!("Pruning object by time: {} (LastModified: {})", key, last_modified_utc);
                                 match self.uploader.delete_object(&key).await {
                                     Ok(_) => {
+                                        if key.ends_with(".narinfo") {
+                                            let hash = if key.starts_with("sha256:") {
+                                                &key[7..key.len() - 8]
+                                            } else {
+                                                &key[..key.len() - 8]
+                                            };
+                                            if let Err(e) = self.local_cache.remove_hash(hash) {
+                                                error!("Failed to remove hash {} from local cache: {:?}", hash, e);
+                                            } else {
+                                                debug!("Removed hash {} from local cache after pruning", hash);
+                                            }
+                                        }
                                         time_based_pruned_count += 1;
                                     },
                                     Err(e) => {

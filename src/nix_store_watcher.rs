@@ -130,16 +130,20 @@ pub async fn scan_and_process_existing_paths(
     Ok(())
 }
 
+use tokio_util::sync::CancellationToken;
+
 /// Watches the Nix store and uploads new paths.
 pub async fn watch_store(
     uploader: Arc<S3Uploader>,
     local_cache: Arc<LocalCache>,
     config: &Config,
     force_scan: bool,
+    cancel_token: CancellationToken,
 ) -> Result<()> {
     let nix_store = NixStore::connect()?;
     let (tx, mut rx) = mpsc::channel(100);
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
+    let mut join_set = tokio::task::JoinSet::new();
 
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, NotifyError>| {
         if let Ok(event) = res {
@@ -163,27 +167,42 @@ pub async fn watch_store(
         nix_store.store_dir()
     );
 
-    while let Some(path) = rx.recv().await {
-        let uploader_clone = uploader.clone();
-        let local_cache_clone = local_cache.clone();
-        let semaphore_clone = semaphore.clone();
-        let config_for_task = config.clone(); // Clone config for the spawned task
-        tokio::spawn(async move {
-            let permit = semaphore_clone.acquire_owned().await.unwrap();
-            if let Err(e) = process_path(
-                uploader_clone,
-                local_cache_clone,
-                &path,
-                &config_for_task,
-                force_scan,
-            )
-            .await
-            {
-                error!("Failed to process '{}': {:?}", path.display(), e);
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                info!("Watcher received cancellation signal. Shutting down.");
+                break;
             }
-            drop(permit);
-        });
+            path_opt = rx.recv() => {
+                if let Some(path) = path_opt {
+                    let uploader_clone = uploader.clone();
+                    let local_cache_clone = local_cache.clone();
+                    let semaphore_clone = semaphore.clone();
+                    let config_for_task = config.clone(); // Clone config for the spawned task
+                    join_set.spawn(async move {
+                        let permit = semaphore_clone.acquire_owned().await.unwrap();
+                        if let Err(e) = process_path(
+                            uploader_clone,
+                            local_cache_clone,
+                            &path,
+                            &config_for_task,
+                            force_scan,
+                        )
+                        .await
+                        {
+                            error!("Failed to process '{}': {:?}", path.display(), e);
+                        }
+                        drop(permit);
+                    });
+                } else {
+                    break;
+                }
+            }
+        }
     }
+
+    info!("Waiting for active uploads to finish...");
+    while let Some(_) = join_set.join_next().await {}
 
     Ok(())
 }

@@ -226,61 +226,79 @@ impl S3Uploader {
                 .ok_or_else(|| anyhow::anyhow!("Failed to get upload ID"))?;
 
             let mut parts: Vec<CompletedPart> = Vec::new();
-            let mut file = File::open(file_path).await?;
+            let mut file = match File::open(file_path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    self.client.abort_multipart_upload().bucket(&self.bucket).key(key).upload_id(&upload_id).send().await?;
+                    return Err(e.into());
+                }
+            };
             let mut part_number = 1;
             let mut bytes_read = 0;
 
-            while bytes_read < file_size {
-                let mut buffer = vec![0; MIN_MULTIPART_UPLOAD_SIZE as usize];
-                let read_len = file.read(&mut buffer).await?;
+            let upload_result: Result<()> = async {
+                while bytes_read < file_size {
+                    let mut buffer = vec![0; MIN_MULTIPART_UPLOAD_SIZE as usize];
+                    let read_len = file.read(&mut buffer).await?;
 
-                if read_len == 0 {
-                    break; // End of file
+                    if read_len == 0 {
+                        break; // End of file
+                    }
+
+                    let chunk = &buffer[..read_len];
+                    let stream = ByteStream::from(chunk.to_vec());
+
+                    let upload_part_res = self
+                        .client
+                        .upload_part()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(&upload_id)
+                        .part_number(part_number)
+                        .body(stream)
+                        .send()
+                        .await?;
+
+                    parts.push(
+                        CompletedPart::builder()
+                            .part_number(part_number)
+                            .e_tag(upload_part_res.e_tag.unwrap_or_default())
+                            .build(),
+                    );
+
+                    bytes_read += read_len as u64;
+                    part_number += 1;
                 }
 
-                let chunk = &buffer[..read_len];
-                let stream = ByteStream::from(chunk.to_vec());
-
-                let upload_part_res = self
-                    .client
-                    .upload_part()
+                self.client
+                    .complete_multipart_upload()
                     .bucket(&self.bucket)
                     .key(key)
                     .upload_id(&upload_id)
-                    .part_number(part_number)
-                    .body(stream)
+                    .multipart_upload(
+                        aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                            .set_parts(Some(parts))
+                            .build(),
+                    )
                     .send()
                     .await?;
+                Ok(())
+            }.await;
 
-                parts.push(
-                    CompletedPart::builder()
-                        .part_number(part_number)
-                        .e_tag(upload_part_res.e_tag.unwrap_or_default())
-                        .build(),
-                );
-
-                bytes_read += read_len as u64;
-                part_number += 1;
+            match upload_result {
+                Ok(_) => {
+                    info!(
+                        "Successfully uploaded '{}' to '{}' using multipart upload.",
+                        file_path.display(),
+                        key
+                    );
+                },
+                Err(e) => {
+                    warn!("Multipart upload failed for '{}'. Aborting...", file_path.display());
+                    let _ = self.client.abort_multipart_upload().bucket(&self.bucket).key(key).upload_id(&upload_id).send().await;
+                    return Err(e);
+                }
             }
-
-            self.client
-                .complete_multipart_upload()
-                .bucket(&self.bucket)
-                .key(key)
-                .upload_id(&upload_id)
-                .multipart_upload(
-                    aws_sdk_s3::types::CompletedMultipartUpload::builder()
-                        .set_parts(Some(parts))
-                        .build(),
-                )
-                .send()
-                .await?;
-
-            info!(
-                "Successfully uploaded '{}' to '{}' using multipart upload.",
-                file_path.display(),
-                key
-            );
         }
         Ok(())
     }
@@ -323,50 +341,62 @@ impl S3Uploader {
             let mut current_pos = 0;
             let mut part_number = 1;
 
-            while current_pos < bytes_len {
-                let end_pos = (current_pos + MIN_MULTIPART_UPLOAD_SIZE).min(bytes_len);
-                let chunk = &bytes[current_pos as usize..end_pos as usize];
-                let stream = ByteStream::from(chunk.to_vec());
+            let upload_result: Result<()> = async {
+                while current_pos < bytes_len {
+                    let end_pos = (current_pos + MIN_MULTIPART_UPLOAD_SIZE).min(bytes_len);
+                    let chunk = &bytes[current_pos as usize..end_pos as usize];
+                    let stream = ByteStream::from(chunk.to_vec());
 
-                let upload_part_res = self
-                    .client
-                    .upload_part()
+                    let upload_part_res = self
+                        .client
+                        .upload_part()
+                        .bucket(&self.bucket)
+                        .key(key)
+                        .upload_id(&upload_id)
+                        .part_number(part_number)
+                        .body(stream)
+                        .send()
+                        .await?;
+
+                    parts.push(
+                        CompletedPart::builder()
+                            .part_number(part_number)
+                            .e_tag(upload_part_res.e_tag.unwrap_or_default())
+                            .build(),
+                    );
+
+                    current_pos = end_pos;
+                    part_number += 1;
+                }
+
+                self.client
+                    .complete_multipart_upload()
                     .bucket(&self.bucket)
                     .key(key)
                     .upload_id(&upload_id)
-                    .part_number(part_number)
-                    .body(stream)
+                    .multipart_upload(
+                        aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                            .set_parts(Some(parts))
+                            .build(),
+                    )
                     .send()
                     .await?;
+                Ok(())
+            }.await;
 
-                parts.push(
-                    CompletedPart::builder()
-                        .part_number(part_number)
-                        .e_tag(upload_part_res.e_tag.unwrap_or_default())
-                        .build(),
-                );
-
-                current_pos = end_pos;
-                part_number += 1;
+            match upload_result {
+                Ok(_) => {
+                    info!(
+                        "Successfully uploaded bytes to '{}' using multipart upload.",
+                        key
+                    );
+                },
+                Err(e) => {
+                    warn!("Multipart upload failed for bytes to '{}'. Aborting...", key);
+                    let _ = self.client.abort_multipart_upload().bucket(&self.bucket).key(key).upload_id(&upload_id).send().await;
+                    return Err(e);
+                }
             }
-
-            self.client
-                .complete_multipart_upload()
-                .bucket(&self.bucket)
-                .key(key)
-                .upload_id(&upload_id)
-                .multipart_upload(
-                    aws_sdk_s3::types::CompletedMultipartUpload::builder()
-                        .set_parts(Some(parts))
-                        .build(),
-                )
-                .send()
-                .await?;
-
-            info!(
-                "Successfully uploaded bytes to '{}' using multipart upload.",
-                key
-            );
         }
         Ok(())
     }

@@ -36,5 +36,6 @@ hex = "0.4.3"
 redb = "3.0.1"
 console-subscriber = "0.4.1"
 nix-base32 = "0.2.0"
+tokio-util = "0.7.18"
 
 
