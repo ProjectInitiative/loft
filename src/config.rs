@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Main configuration for the application.
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Default, Debug, Clone)]
 pub struct Config {
     /// S3 storage configuration.
     pub s3: S3Config,
@@ -22,6 +22,12 @@ pub enum Compression {
     Zstd,
 }
 
+impl Default for Compression {
+    fn default() -> Self {
+        default_compression()
+    }
+}
+
 fn default_local_cache_path() -> PathBuf {
     PathBuf::from("/var/lib/loft/cache.db")
 }
@@ -30,16 +36,12 @@ fn default_local_cache_path() -> PathBuf {
 #[derive(Deserialize, Debug, Clone)]
 pub struct LoftConfig {
     /// The path to the local cache database file.
-    #[serde(default = "default_local_cache_path")]
     pub local_cache_path: PathBuf,
     /// The number of concurrent uploads to perform.
-    #[serde(default = "default_upload_threads")]
     pub upload_threads: usize,
     /// Whether to perform an initial scan of the store on startup.
-    #[serde(default)]
     pub scan_on_startup: bool,
     /// Whether to populate the local cache from S3 on startup if the cache is empty.
-    #[serde(default)]
     pub populate_cache_on_startup: bool,
     /// Optional: Path to your Nix signing key file (e.g., /etc/nix/signing-key.sec)
     /// If provided, uploaded paths will be signed.
@@ -51,19 +53,14 @@ pub struct LoftConfig {
     /// If a path is signed by any of these keys, it will not be uploaded.
     pub skip_signed_by_keys: Option<Vec<String>>,
     /// Optional: Use disk for large NARs instead of memory.
-    #[serde(default)]
     pub use_disk_for_large_nars: bool,
     /// Optional: The threshold in MB for what is considered a large NAR.
-    #[serde(default = "default_large_nar_threshold_mb")]
     pub large_nar_threshold_mb: u64,
     /// The compression algorithm to use.
-    #[serde(default = "default_compression")]
     pub compression: Compression,
     /// Optional: Enable pruning of old objects from the S3 cache.
-    #[serde(default)]
     pub prune_enabled: bool,
     /// Optional: Retention period for pruning in days. Objects older than this will be deleted.
-    #[serde(default = "default_prune_retention_days")]
     pub prune_retention_days: u64,
     /// Optional: Maximum desired size of the S3 bucket in GB. If exceeded, oldest objects are pruned.
     pub prune_max_size_gb: Option<u64>,
@@ -74,8 +71,30 @@ pub struct LoftConfig {
     pub prune_schedule: Option<String>,
 }
 
+impl Default for LoftConfig {
+    fn default() -> Self {
+        Self {
+            local_cache_path: default_local_cache_path(),
+            upload_threads: default_upload_threads(),
+            scan_on_startup: false,
+            populate_cache_on_startup: false,
+            signing_key_path: None,
+            signing_key_name: None,
+            skip_signed_by_keys: None,
+            use_disk_for_large_nars: false,
+            large_nar_threshold_mb: default_large_nar_threshold_mb(),
+            compression: default_compression(),
+            prune_enabled: false,
+            prune_retention_days: default_prune_retention_days(),
+            prune_max_size_gb: None,
+            prune_target_percentage: Some(80),
+            prune_schedule: None,
+        }
+    }
+}
+
 /// S3-specific configuration.
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Default, Debug, Clone)]
 pub struct S3Config {
     pub bucket: String,
     pub region: String,
