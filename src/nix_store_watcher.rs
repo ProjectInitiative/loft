@@ -29,6 +29,7 @@ pub async fn scan_and_process_existing_paths(
     local_cache: Arc<LocalCache>,
     config: &Config,
     force_scan: bool,
+    dry_run: bool,
 ) -> Result<()> {
     info!("Starting scan of existing store paths...");
     let nix_store = Arc::new(NixStore::connect()?);
@@ -107,6 +108,14 @@ pub async fn scan_and_process_existing_paths(
         return Ok(());
     }
 
+    if dry_run {
+        info!("DRY RUN: The following {} paths would be uploaded:", result.to_upload.len());
+        for path in &result.to_upload {
+            info!("  DRY RUN: Would upload {}", path);
+        }
+        return Ok(());
+    }
+
     // 8. Upload missing
     info!("Found {} paths to upload.", result.to_upload.len());
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
@@ -164,6 +173,7 @@ pub async fn watch_store(
     local_cache: Arc<LocalCache>,
     config: &Config,
     force_scan: bool,
+    dry_run: bool,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     let nix_store = NixStore::connect()?;
@@ -213,6 +223,7 @@ pub async fn watch_store(
                             &path,
                             &config_for_task,
                             force_scan,
+                            dry_run,
                         )
                         .await
                         {
@@ -240,6 +251,7 @@ pub async fn process_path(
     path: &Path,
     config: &Config,
     force_scan: bool,
+    dry_run: bool,
 ) -> Result<()> {
     // Add a small delay to allow for follow-up operations like signing
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -282,6 +294,14 @@ pub async fn process_path(
     );
 
     result.to_upload = filtered_closure_vec;
+
+    if dry_run {
+        info!("DRY RUN: The following {} paths would be uploaded for {}:", result.to_upload.len(), path.display());
+        for p in result.to_upload {
+            info!("  DRY RUN: Would upload {}", p);
+        }
+        return Ok(());
+    }
 
     // 5. Upload missing
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));

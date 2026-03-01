@@ -51,6 +51,10 @@ struct Args {
     /// Manually trigger pruning of old objects.
     #[arg(long)]
     prune: bool,
+
+    /// Perform a dry run (scan only, do not upload).
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[tokio::main]
@@ -137,6 +141,7 @@ async fn main() -> Result<()> {
                 &path,
                 &config_clone,
                 true, // Force scan for manual uploads
+                args.dry_run,
             )
             .await
             {
@@ -181,6 +186,7 @@ async fn main() -> Result<()> {
             local_cache.clone(),
             &config,
             args.force_scan,
+            args.dry_run,
         )
         .await?;
         info!("Finished scanning existing store paths.");
@@ -188,8 +194,8 @@ async fn main() -> Result<()> {
         local_cache.set_scan_complete()?;
     }
 
-    if args.force_scan {
-        info!("Force scan complete. Exiting.");
+    if args.force_scan || args.dry_run {
+        info!("One-shot operation complete. Exiting.");
         return Ok(());
     }
 
@@ -202,12 +208,14 @@ async fn main() -> Result<()> {
         let local_cache = local_cache.clone();
         let config = config.clone();
         let cancel_token = cancel_token.clone();
+        let dry_run = args.dry_run;
         async move {
             if let Err(e) = nix_store_watcher::watch_store(
                 uploader,
                 local_cache,
                 &config,
                 args.force_scan,
+                dry_run,
                 cancel_token,
             )
             .await
