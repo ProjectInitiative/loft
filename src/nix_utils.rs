@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use attic::nix_store::NixStore; // Keep NixStore
 use attic::signing::NixKeypair; // Added this line
@@ -39,15 +39,25 @@ pub async fn filter_out_sig_keys(
     let paths_to_process: HashMap<String, Vec<Signature>> = sigs_map
         .iter()
         .filter(|(path, _sig_vec)| !path.ends_with(".drv"))
-        .filter(|(_path, sig_vec)| {
-            // 3. ✅ Update the filter logic to check if the set contains the key.
-            !sig_vec.iter().any(|sig| {
+        .filter(|(path, sig_vec)| {
+            let mut skip = false;
+            for sig in *sig_vec {
                 if let Signature::Crypto { key_name, .. } = sig {
-                    keys_to_skip_set.contains(key_name)
-                } else {
-                    false
+                    if keys_to_skip_set.contains(key_name) {
+                        debug!("Skipping path {} because it is signed by {}", path, key_name);
+                        skip = true;
+                        break;
+                    }
                 }
-            })
+            }
+            if !skip {
+                if sig_vec.is_empty() {
+                    debug!("Keeping path {} because it has no signatures", path);
+                } else {
+                    debug!("Keeping path {} because no skip-keys matched its signatures", path);
+                }
+            }
+            !skip
         })
         .map(|(path, sig_vec)| (path.clone(), sig_vec.clone()))
         .collect();
@@ -99,6 +109,36 @@ pub async fn get_all_path_signatures() -> Result<HashMap<String, Vec<Signature>>
         .arg("--all")
         .output()
         .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("nix path-info failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let path_signatures = parse_path_signatures_from_json(&stdout)?;
+
+    info!("Done. Found info for {} paths.", path_signatures.len());
+    Ok(path_signatures)
+}
+
+pub async fn get_path_signatures_bulk(paths: &[String]) -> Result<HashMap<String, Vec<Signature>>> {
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+    
+    info!(
+        "Fetching and parsing signatures for {} paths using nix CLI...",
+        paths.len()
+    );
+
+    let mut cmd = Command::new("nix");
+    cmd.arg("path-info").arg("--sigs").arg("--json");
+    for path in paths {
+        cmd.arg(path);
+    }
+    
+    let output = cmd.output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
