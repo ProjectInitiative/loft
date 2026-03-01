@@ -2,7 +2,6 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
     sync::Arc,
 };
 use tracing::{debug, info};
@@ -41,27 +40,12 @@ impl NixHashProvider for NixStore {
         paths: &'a [String],
     ) -> BoxFuture<'a, Result<HashMap<String, String>>> {
         Box::pin(async move {
-            let mut tasks = Vec::new();
-            for p in paths {
-                let p = p.clone();
-                tasks.push(async move {
-                    let store_path = self.parse_store_path(Path::new(&p))?;
-                    let info = self.query_path_info(store_path).await?;
-                    let hash = info
-                        .nar_hash
-                        .to_typed_base32()
-                        .strip_prefix("sha256:")
-                        .unwrap_or_default()
-                        .to_string();
-                    Ok::<_, anyhow::Error>((p, hash))
-                });
-            }
-
-            let results = futures::future::join_all(tasks).await;
             let mut map = HashMap::new();
-            for res in results {
-                let (p, hash) = res?;
-                map.insert(p, hash);
+            for p in paths {
+                // Extract the store path hash directly from the path string.
+                // This is fast and what .narinfo files are named after.
+                let hash = crate::local_cache::LocalCache::extract_hash_from_path(p)?;
+                map.insert(p.clone(), hash);
             }
             Ok(map)
         })
@@ -369,12 +353,12 @@ mod tests {
     /// remotely cached are skipped but added locally, and uncached paths are returned.
     #[tokio::test]
     async fn test_check_paths_logic() -> Result<()> {
-        let path1 = "/nix/store/path1";
-        let hash1 = "hash1";
-        let path2 = "/nix/store/path2";
-        let hash2 = "hash2"; // cached locally
-        let path3 = "/nix/store/path3";
-        let hash3 = "hash3"; // cached remotely
+        let hash1 = "00000000000000000000000000000001";
+        let path1 = format!("/nix/store/{}-path1", hash1);
+        let hash2 = "00000000000000000000000000000002";
+        let path2 = format!("/nix/store/{}-path2", hash2); // cached locally
+        let hash3 = "00000000000000000000000000000003";
+        let path3 = format!("/nix/store/{}-path3", hash3); // cached remotely
 
         let mut hashes = HashMap::new();
         hashes.insert(path1.to_string(), hash1.to_string());
@@ -386,30 +370,7 @@ mod tests {
         let nix_provider = MockNixHashProvider::new(hashes);
         // We use a blank config here since we don't need real configuration
         // for this test, just some default values to satisfy CacheChecker::new
-        let config = crate::config::Config {
-            s3: crate::config::S3Config {
-                endpoint: "".to_string(),
-                region: "".to_string(),
-                bucket: "".to_string(),
-                access_key: None,
-                secret_key: None,
-            },
-            loft: crate::config::LoftConfig {
-                local_cache_path: std::path::PathBuf::from(""),
-                signing_key_path: None,
-                signing_key_name: None,
-                upload_threads: 1,
-                skip_signed_by_keys: None,
-                compression: crate::config::Compression::Zstd,
-                prune_enabled: false,
-                prune_schedule: None,
-                prune_retention_days: 30,
-                prune_max_size_gb: None,
-                prune_target_percentage: Some(90),
-                scan_on_startup: false,
-                populate_cache_on_startup: false,
-            },
-        };
+        let config = crate::config::Config::default();
 
         let checker = CacheChecker::new(remote_cache, local_cache.clone(), config);
 
@@ -440,8 +401,8 @@ mod tests {
     /// querying the remote cache.
     #[tokio::test]
     async fn test_check_paths_all_local() -> Result<()> {
-        let path1 = "/nix/store/path1";
-        let hash1 = "hash1";
+        let hash1 = "00000000000000000000000000000001";
+        let path1 = format!("/nix/store/{}-path1", hash1);
 
         let mut hashes = HashMap::new();
         hashes.insert(path1.to_string(), hash1.to_string());
@@ -464,8 +425,8 @@ mod tests {
     /// Tests that when `force_scan` is true, the local cache check is bypassed.
     #[tokio::test]
     async fn test_check_paths_force_scan() -> Result<()> {
-        let path1 = "/nix/store/path1";
-        let hash1 = "hash1";
+        let hash1 = "00000000000000000000000000000001";
+        let path1 = format!("/nix/store/{}-path1", hash1);
 
         let mut hashes = HashMap::new();
         hashes.insert(path1.to_string(), hash1.to_string());

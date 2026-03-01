@@ -303,23 +303,15 @@ async fn populate_local_cache_from_s3(
     local_cache: Arc<local_cache::LocalCache>,
 ) -> Result<()> {
     info!("Populating local cache from S3...");
-    let all_narinfo_keys = uploader.list_all_narinfo_keys().await?;
-    info!("Found {} .narinfo keys in S3.", all_narinfo_keys.len());
+    let all_hashes = uploader.list_all_narinfo_keys().await?;
+    info!("Found {} hashes in S3.", all_hashes.len());
 
-    let mut hashes = Vec::new();
-    for key in all_narinfo_keys {
-        if let Some(hash) = key.strip_suffix(".narinfo") {
-            // Do NOT add "sha256:" prefix here. Store as plain hash.
-            hashes.push(hash.to_string());
-        }
-    }
     debug!(
-        "Adding {} hashes to local cache: {:?}",
-        hashes.len(),
-        hashes
+        "Adding {} hashes to local cache.",
+        all_hashes.len()
     );
 
-    local_cache.add_many_path_hashes(&hashes)?;
+    local_cache.add_many_path_hashes(&all_hashes)?;
     local_cache.set_scan_complete()?;
     info!("Local cache populated from S3.");
 
