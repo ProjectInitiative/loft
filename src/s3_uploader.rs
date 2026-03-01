@@ -150,7 +150,7 @@ impl S3Uploader {
 
     /// Lists all .narinfo keys in the S3 bucket.
     pub async fn list_all_narinfo_keys(&self) -> Result<Vec<String>> {
-        let mut all_keys = Vec::new();
+        let mut all_hashes = Vec::new();
         let mut continuation_token: Option<String> = None;
 
         loop {
@@ -165,17 +165,10 @@ impl S3Uploader {
             if let Some(contents) = output.contents {
                 for object in contents {
                     if let Some(key) = object.key {
-                        if key.ends_with(".narinfo") {
-                            let processed_key = if let Some(stripped) = key.strip_prefix("sha256:")
-                            {
-                                stripped.to_string()
-                            } else {
-                                key
-                            };
-                            // Strip the .narinfo suffix to get the pure Nix hash
-                            if let Some(hash) = processed_key.strip_suffix(".narinfo") {
-                                all_keys.push(hash.to_string());
-                            }
+                        // Keys in S3 are like "jk4p7c6zr6hlszif7cc8q7hr58p121c0.narinfo"
+                        // They do NOT have "sha256:" prefix.
+                        if let Some(hash) = key.strip_suffix(".narinfo") {
+                            all_hashes.push(hash.to_string());
                         }
                     }
                 }
@@ -188,7 +181,8 @@ impl S3Uploader {
             }
         }
 
-        Ok(all_keys)
+        debug!("Found {} .narinfo hashes in S3 bucket '{}'.", all_hashes.len(), self.bucket);
+        Ok(all_hashes)
     }
 
     /// Uploads a stream of bytes to S3 using multipart upload.
