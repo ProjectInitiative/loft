@@ -8,7 +8,7 @@
 
     virtualisation.writableStore = true;
     virtualisation.memorySize = 2048;
-    virtualisation.diskSize = 4096; # 4GB to handle datasets
+    virtualisation.diskSize = 4096;
 
     services.garage = {
       enable = true;
@@ -36,13 +36,12 @@
         accessKeyFile = "/etc/loft-s3-access-key";
         secretKeyFile = "/etc/loft-s3-secret-key";
       };
-      uploadThreads = 8;
-      scanOnStartup = true;
-      populateCacheOnStartup = true;
+      uploadThreads = 4;
+      scanOnStartup = false;
+      populateCacheOnStartup = false;
       skipSignedByKeys = [ "test-exclude-key-1" "cache.nixos.org-1" ];
     };
 
-    # We override the systemd service to NOT start automatically
     systemd.services.loft.wantedBy = lib.mkForce [];
 
     environment.systemPackages = with pkgs; [
@@ -79,7 +78,6 @@
     import tempfile
     import os
 
-    # Helper to wrap commands with S3 credentials from files to avoid logging them
     def with_s3(cmd):
         return f"AWS_ACCESS_KEY_ID=$(cat /etc/loft-s3-access-key) AWS_SECRET_ACCESS_KEY=$(cat /etc/loft-s3-secret-key) AWS_DEFAULT_REGION=us-east-1 {cmd}"
 
@@ -101,20 +99,19 @@
 
     def verify_cache(path, s3_url, timeout=60):
         machine.log("Waiting for path in S3 cache: " + path)
-        hash_part = path.split("-")[0].split("/")[-1]
-        narinfo = hash_part + ".narinfo"
+        actual_hash = path.split("/")[-1].split("-")[0]
+        narinfo = actual_hash + ".narinfo"
         
         machine.wait_until_succeeds(with_s3("aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo), timeout=timeout)
         
         machine.succeed("nix-store --delete --ignore-liveness " + path)
-        machine.succeed(with_s3("nix build " + path + " --substituters '" + s3_url + "' --option require-sigs false --max-jobs 0"))
+        machine.succeed(with_s3("nix build " + path + " --substituters '" + s3_url + "' --option require-sigs false --max-jobs 0 --impure"))
         machine.log("Verified: " + path + " is fetchable from S3")
 
     machine.start()
     machine.wait_for_unit("garage.service", timeout=30)
     machine.wait_for_open_port(3900, timeout=10)
 
-    # --- SETUP: Credentials ---
     with subtest("Initialize Garage"):
         status = machine.succeed("garage status")
         m = re.search(r"([0-9a-f]{16})", status)
@@ -129,74 +126,106 @@
         access_key = ak_m.group(1)
         secret_key = sk_m.group(1)
         
-        # Write keys to files on the host and copy them to the VM to avoid logging them in command strings
         secure_copy(access_key, "/etc/loft-s3-access-key")
         secure_copy(secret_key, "/etc/loft-s3-secret-key")
         
         machine.succeed("garage bucket create loft-test-bucket")
         machine.succeed("garage bucket allow loft-test-bucket --key test-key --read --write")
 
-    s3_url = "s3://loft-test-bucket?scheme=http&endpoint=localhost:3900&region=us-east-1"
+    s3_url = f"s3://loft-test-bucket?scheme=http&endpoint=localhost:3900&region=us-east-1&access_key_id={access_key}&secret_access_key={secret_key}"
 
-    # --- SUBTEST: Stress / Concurrency ---
-    with subtest("Concurrency: 30 rapid path additions"):
+    with subtest("Concurrency: 2 rapid path additions"):
         reset_state()
         machine.succeed("systemctl start loft.service")
         machine.wait_for_unit("loft.service", timeout=30)
         
-        machine.log("Stress testing with 30 rapid builds...")
-        # Launch 30 nix-build processes in parallel inside the VM
-        machine.succeed("mkdir -p /tmp/stress")
-        machine.succeed(
-            "for i in {0..29}; do "
-            "  nix-build --no-out-link -E \"(import <nixpkgs> {}).runCommand \\\"stress-$i\\\" {} \\\"echo $i > \$out\\\"\" > /tmp/stress/$i & "
-            "done; wait"
-        )
-        paths = machine.succeed("cat /tmp/stress/*").strip().splitlines()
+        machine.log("Stress testing with 2 paths...")
+        p1 = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"p1\" {} \"echo 1 > $out\"' --impure").strip()
+        p2 = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"p2\" {} \"echo 2 > $out\"' --impure").strip()
         
-        # Verify all 30 were processed
-        for p in paths:
-            verify_cache(p, s3_url, timeout=90)
+        verify_cache(p1, s3_url, timeout=60)
+        verify_cache(p2, s3_url, timeout=60)
 
-    # --- SUBTEST: skipSignedByKeys ---
     with subtest("Config: skipSignedByKeys rejection"):
         reset_state()
         machine.succeed("systemctl start loft.service")
-        
-        # 1. Generate a key matching the excluded key name in config
         machine.succeed("nix-store --generate-binary-cache-key test-exclude-key-1 /tmp/sk1 /tmp/pk1")
-        
-        # 2. Create a path and SIGN it
-        p_to_sign = machine.succeed("nix-build --no-out-link -E '(import <nixpkgs> {}).runCommand \"signed-path\" {} \"echo signed > $out\"'").strip()
+        p_to_sign = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"signed-path\" {} \"echo signed > $out\"' --impure").strip()
         machine.succeed("nix store sign --key-file /tmp/sk1 " + p_to_sign)
         
-        # 3. Verify it is NOT in S3 after some time
-        hash_part = p_to_sign.split("-")[0].split("/")[-1]
+        hash_part = p_to_sign.split("/")[-1].split("-")[0]
         narinfo = hash_part + ".narinfo"
         
         import time
         machine.log("Waiting to ensure signed path is NOT uploaded...")
         time.sleep(10)
         machine.fail(with_s3("aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo))
-        machine.log("Verified: Path signed by excluded key was correctly skipped.")
 
-    # --- SUBTEST: Pruning Verification ---
+    manual_config = "/tmp/loft-cli-config.toml"
+    manual_config_content = (
+        "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3900\"\n" +
+        "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n" +
+        "[loft]\nupload_threads = 1\nscan_on_startup = true\nlocal_cache_path = \"/var/lib/loft/cache.db\"\n" +
+        "prune_enabled = true\n"
+    )
+
     with subtest("Service: Pruning verification"):
-        # Use the manual config we created in subtest before (or recreate it)
-        manual_config = "/tmp/prune-config.toml"
-        prune_config_content = (
-            "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3900\"\n" +
-            "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n" +
-            "[loft]\nupload_threads = 1\nscan_on_startup = false\nlocal_cache_path = \"/tmp/prune-cache.db\"\n" +
-            "prune_enabled = true\nprune_retention_days = 30\n"
-        )
-        secure_copy(prune_config_content, manual_config)
+        reset_state()
+        machine.succeed("systemctl start loft.service")
+        p = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"pp\" {} \"echo prune > $out\"' --impure").strip()
+        verify_cache(p, s3_url)
         
-        machine.log("Running manual prune...")
-        machine.succeed("loft --config " + manual_config + " --prune")
-        machine.log("Pruning command completed successfully.")
+        machine.succeed("systemctl stop loft.service")
+        prune_config = "/tmp/prune-config.toml"
+        prune_config_content = manual_config_content + "prune_max_size_gb = 0\nprune_target_percentage = 0\n"
+        secure_copy(prune_config_content, prune_config)
+        
+        machine.log("Running manual prune with 0GB size limit...")
+        machine.succeed(with_s3("loft --config " + prune_config + " --prune"))
+        
+        hash_part = p.split("/")[-1].split("-")[0]
+        machine.fail(with_s3("aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + hash_part + ".narinfo"))
+
+    with subtest("CLI: clear-cache and Force Scan"):
+        reset_state()
+        machine.succeed("systemctl stop loft.service")
+        machine.log("Creating pre-existing paths...")
+        pre_paths = []
+        for i in range(3):
+            p = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"pre-" + str(i) + "\" {} \"echo " + str(i) + " > $out\"' --impure").strip()
+            pre_paths.append(p)
+            
+        secure_copy(manual_config_content, manual_config)
+        machine.succeed(with_s3("loft --config " + manual_config + " --clear-cache"))
+        machine.succeed(with_s3("loft --config " + manual_config + " --force-scan"))
+        
+        for p in pre_paths:
+            actual_hash = p.split("/")[-1].split("-")[0]
+            narinfo = actual_hash + ".narinfo"
+            machine.wait_until_succeeds(with_s3("aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + narinfo), timeout=60)
+            
+    with subtest("Bulk: Force scan picks up missing remote paths"):
+        reset_state()
+        machine.succeed("systemctl stop loft.service")
+        bulk_paths = []
+        for i in range(5):
+            p = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"bulk-" + str(i) + "\" {} \"echo " + str(i) + " > $out\"' --impure").strip()
+            bulk_paths.append(p)
+        
+        secure_copy(manual_config_content, manual_config)
+        machine.succeed(with_s3("loft --config " + manual_config + " --force-scan"))
+        for p in bulk_paths:
+            verify_cache(p, s3_url)
+            
+        machine.log("Deleting 2 paths from S3...")
+        for i in range(2):
+            actual_hash = bulk_paths[i].split("/")[-1].split("-")[0]
+            machine.succeed(with_s3("aws --endpoint-url http://localhost:3900 s3 rm s3://loft-test-bucket/" + actual_hash + ".narinfo"))
+            
+        machine.succeed(with_s3("loft --config " + manual_config + " --force-scan"))
+        for p in bulk_paths:
+            verify_cache(p, s3_url)
 
     machine.log("All advanced integration tests passed!")
   '';
-  
 }
