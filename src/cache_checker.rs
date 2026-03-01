@@ -72,8 +72,10 @@ impl NixHashProvider for NixStore {
 pub struct CacheCheckResult {
     /// Paths that must still be uploaded.
     pub to_upload: Vec<String>,
-    /// Hashes that were already cached locally (for bookkeeping).
-    pub already_cached: Vec<String>,
+    /// Number of paths that were found in the local cache.
+    pub local_hits: usize,
+    /// Number of paths that were found in the remote cache.
+    pub remote_hits: usize,
 }
 
 pub struct CacheChecker {
@@ -105,7 +107,8 @@ impl CacheChecker {
         if paths.is_empty() {
             return Ok(CacheCheckResult {
                 to_upload: vec![],
-                already_cached: vec![],
+                local_hits: 0,
+                remote_hits: 0,
             });
         }
 
@@ -138,31 +141,34 @@ impl CacheChecker {
         let hashes_map = nix_provider.get_hashes(paths).await?;
 
         // 1. Identify what we need to check against remote
-        let paths_to_check_remote: Vec<String> = if force_scan {
-            paths.to_vec()
+        let (paths_to_check_remote, local_hits): (Vec<String>, usize) = if force_scan {
+            (paths.to_vec(), 0)
         } else {
             let hashes: Vec<String> = paths
                 .iter()
                 .map(|p| hashes_map.get(p).cloned().unwrap_or_default())
                 .collect();
             let existing = self.local_cache.find_existing_hashes(&hashes)?;
-            info!("Local cache already has {} entries", existing.len());
+            let local_hits = existing.len();
+            debug!("Local cache already has {} entries", local_hits);
 
-            paths
+            let missing = paths
                 .iter()
                 .filter(|&p| {
                     let h = hashes_map.get(p).unwrap();
                     !existing.contains(h)
                 })
                 .cloned()
-                .collect()
+                .collect();
+            (missing, local_hits)
         };
 
         if paths_to_check_remote.is_empty() {
             debug!("No paths to check against remote cache.");
             return Ok(CacheCheckResult {
                 to_upload: vec![],
-                already_cached: paths.to_vec(),
+                local_hits,
+                remote_hits: 0,
             });
         }
 
@@ -216,7 +222,8 @@ impl CacheChecker {
                 .await?
         };
 
-        debug!("{} found on remote", found_remote.len());
+        let remote_hits = found_remote.len();
+        debug!("{} found on remote", remote_hits);
 
         // 3. Add newly discovered found-on-remote → local cache
         if !found_remote.is_empty() {
@@ -231,12 +238,9 @@ impl CacheChecker {
 
         // 4. Return results
         Ok(CacheCheckResult {
-            already_cached: paths
-                .iter()
-                .filter(|p| !to_upload.contains(p))
-                .cloned()
-                .collect(),
             to_upload,
+            local_hits,
+            remote_hits,
         })
     }
 }
@@ -421,6 +425,8 @@ mod tests {
         assert!(!result.to_upload.contains(&path2.to_string()));
         assert!(!result.to_upload.contains(&path3.to_string()));
         assert_eq!(result.to_upload.len(), 1);
+        assert_eq!(result.local_hits, 1);
+        assert_eq!(result.remote_hits, 1);
 
         // Verify local cache updated for path3
         let local_hashes = local_cache.find_existing_hashes(&[hash3.to_string()])?;
@@ -443,36 +449,15 @@ mod tests {
         let local_cache = Arc::new(MockLocalCache::new(vec![hash1.to_string()]));
         let remote_cache = Arc::new(MockRemoteCache::new(vec![]));
         let nix_provider = MockNixHashProvider::new(hashes);
-        let config = crate::config::Config {
-            s3: crate::config::S3Config {
-                endpoint: "".to_string(),
-                region: "".to_string(),
-                bucket: "".to_string(),
-                access_key: None,
-                secret_key: None,
-            },
-            loft: crate::config::LoftConfig {
-                local_cache_path: std::path::PathBuf::from(""),
-                signing_key_path: None,
-                signing_key_name: None,
-                upload_threads: 1,
-                skip_signed_by_keys: None,
-                compression: crate::config::Compression::Zstd,
-                prune_enabled: false,
-                prune_schedule: None,
-                prune_retention_days: 30,
-                prune_max_size_gb: None,
-                prune_target_percentage: Some(90),
-                scan_on_startup: false,
-                populate_cache_on_startup: false,
-            },
-        };
+        let config = crate::config::Config::default();
 
         let checker = CacheChecker::new(remote_cache, local_cache, config);
         let paths = vec![path1.to_string()];
         let result = checker.check_paths(&nix_provider, &paths, false).await?;
 
         assert!(result.to_upload.is_empty());
+        assert_eq!(result.local_hits, 1);
+        assert_eq!(result.remote_hits, 0);
         Ok(())
     }
 
@@ -489,30 +474,7 @@ mod tests {
         let local_cache = Arc::new(MockLocalCache::new(vec![hash1.to_string()]));
         let remote_cache = Arc::new(MockRemoteCache::new(vec![])); // but NOT remotely cached
         let nix_provider = MockNixHashProvider::new(hashes);
-        let config = crate::config::Config {
-            s3: crate::config::S3Config {
-                endpoint: "".to_string(),
-                region: "".to_string(),
-                bucket: "".to_string(),
-                access_key: None,
-                secret_key: None,
-            },
-            loft: crate::config::LoftConfig {
-                local_cache_path: std::path::PathBuf::from(""),
-                signing_key_path: None,
-                signing_key_name: None,
-                upload_threads: 1,
-                skip_signed_by_keys: None,
-                compression: crate::config::Compression::Zstd,
-                prune_enabled: false,
-                prune_schedule: None,
-                prune_retention_days: 30,
-                prune_max_size_gb: None,
-                prune_target_percentage: Some(90),
-                scan_on_startup: false,
-                populate_cache_on_startup: false,
-            },
-        };
+        let config = crate::config::Config::default();
 
         let checker = CacheChecker::new(remote_cache, local_cache, config);
 
@@ -521,6 +483,8 @@ mod tests {
         let result = checker.check_paths(&nix_provider, &paths, true).await?;
 
         assert_eq!(result.to_upload, vec![path1.to_string()]);
+        assert_eq!(result.local_hits, 0);
+        assert_eq!(result.remote_hits, 0);
         Ok(())
     }
 }
