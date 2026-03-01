@@ -36,12 +36,16 @@ fn default_local_cache_path() -> PathBuf {
 #[derive(Deserialize, Debug, Clone)]
 pub struct LoftConfig {
     /// The path to the local cache database file.
+    #[serde(default = "default_local_cache_path")]
     pub local_cache_path: PathBuf,
     /// The number of concurrent uploads to perform.
+    #[serde(default = "default_upload_threads")]
     pub upload_threads: usize,
     /// Whether to perform an initial scan of the store on startup.
+    #[serde(default)]
     pub scan_on_startup: bool,
     /// Whether to populate the local cache from S3 on startup if the cache is empty.
+    #[serde(default)]
     pub populate_cache_on_startup: bool,
     /// Optional: Path to your Nix signing key file (e.g., /etc/nix/signing-key.sec)
     /// If provided, uploaded paths will be signed.
@@ -53,14 +57,17 @@ pub struct LoftConfig {
     /// If a path is signed by any of these keys, it will not be uploaded.
     pub skip_signed_by_keys: Option<Vec<String>>,
     /// The compression algorithm to use.
+    #[serde(default = "default_compression")]
     pub compression: Compression,
     /// Optional: Enable pruning of old objects from the S3 cache.
+    #[serde(default)]
     pub prune_enabled: bool,
     /// Optional: Retention period for pruning in days. Objects older than this will be deleted.
+    #[serde(default = "default_prune_retention_days")]
     pub prune_retention_days: u64,
     /// Optional: Maximum desired size of the S3 bucket in GB. If exceeded, oldest objects are pruned.
     pub prune_max_size_gb: Option<u64>,
-    /// Optional: Target percentage to prune down to when prune_max_size_gb is exceeded (e.g., 80).
+    /// Optional: Target percentage to prune down to when maxSizeGb is exceeded (e.g., 80).
     /// Only applicable if prune_max_size_gb is set.
     pub prune_target_percentage: Option<u8>,
     /// Optional: Schedule for running the pruning job (e.g., "24h", "1d").

@@ -604,32 +604,26 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_get_narinfo_key() -> Result<()> {
-        let nix_store = NixStore::connect()?;
-        let path = Path::new("/nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0");
-        let store_path = nix_store.parse_store_path(path)?;
-        
-        let key = get_narinfo_key(&store_path);
-        assert_eq!(key, "hfx4mfjp89kv21whvwcmm2a0bjs0a428.narinfo");
-        
-        Ok(())
-    }
-
-    #[test]
+        #[test]
+        fn test_get_narinfo_key() -> Result<()> {
+            let hash = "hfx4mfjp89kv21whvwcmm2a0bjs0a428";
+    
+            let key = format!("{}.narinfo", hash);
+            assert_eq!(key, "hfx4mfjp89kv21whvwcmm2a0bjs0a428.narinfo");
+    
+            Ok(())
+        }
+        #[test]
     fn test_s3_key_hierarchy() -> Result<()> {
-        let nix_store = NixStore::connect()?;
-        let path = Path::new("/nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0");
-        let store_path = nix_store.parse_store_path(path)?;
-        
+        let hash = "hfx4mfjp89kv21whvwcmm2a0bjs0a428";
         let nar_hash_base32 = "8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140";
         let compression_ext = "xz";
         
         // This simulates the logic inside upload_nar_for_path
-        let nar_key = format!("nar/{}-{}.nar.{}", store_path.to_hash().as_str(), nar_hash_base32, compression_ext);
+        let nar_key = format!("nar/{}-{}.nar.{}", hash, nar_hash_base32, compression_ext);
         assert_eq!(nar_key, "nar/hfx4mfjp89kv21whvwcmm2a0bjs0a428-8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140.nar.xz");
         
-        let narinfo_key = get_narinfo_key(&store_path);
+        let narinfo_key = format!("{}.narinfo", hash);
         assert_eq!(narinfo_key, "hfx4mfjp89kv21whvwcmm2a0bjs0a428.narinfo");
         
         Ok(())

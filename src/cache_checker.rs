@@ -109,7 +109,7 @@ impl CacheChecker {
             });
         }
 
-        // Bulk Warmup Logic
+        // Bulk Warmup Logic (only if not forcing)
         if !force_scan && !self.local_cache.is_scan_complete().unwrap_or(false) {
             info!("Local cache scan is not complete. Fetching all remote hashes to warm up local cache...");
             match self.uploader.list_all_hashes().await {
@@ -136,15 +136,15 @@ impl CacheChecker {
         }
 
         let hashes_map = nix_provider.get_hashes(paths).await?;
-        let hashes: Vec<String> = paths
-            .iter()
-            .map(|p| hashes_map.get(p).cloned().unwrap_or_default())
-            .collect();
 
-        // 1. Local cache check
-        let missing_paths: Vec<String> = if force_scan {
+        // 1. Identify what we need to check against remote
+        let paths_to_check_remote: Vec<String> = if force_scan {
             paths.to_vec()
         } else {
+            let hashes: Vec<String> = paths
+                .iter()
+                .map(|p| hashes_map.get(p).cloned().unwrap_or_default())
+                .collect();
             let existing = self.local_cache.find_existing_hashes(&hashes)?;
             info!("Local cache already has {} entries", existing.len());
 
@@ -158,22 +158,67 @@ impl CacheChecker {
                 .collect()
         };
 
-        if missing_paths.is_empty() && !force_scan {
-            debug!("All paths already in local cache");
+        if paths_to_check_remote.is_empty() {
+            debug!("No paths to check against remote cache.");
             return Ok(CacheCheckResult {
                 to_upload: vec![],
-                already_cached: hashes,
+                already_cached: paths.to_vec(),
             });
         }
 
-        // 2. Remote cache check (pass concurrency from config)
-        let (missing_remote, found_remote) = self
-            .uploader
-            .check_paths_exist(&missing_paths, self.config.loft.upload_threads)
-            .await?;
+        // 2. Remote cache check (bulk vs individual)
+        let (to_upload, found_remote) = if force_scan {
+            info!(
+                "Force scan: Checking all {} paths against remote using bulk list...",
+                paths_to_check_remote.len()
+            );
+            let remote_hashes: HashSet<String> =
+                self.uploader.list_all_hashes().await?.into_iter().collect();
+
+            let mut missing = Vec::new();
+            let mut found = Vec::new();
+            for p in paths_to_check_remote {
+                let h = hashes_map.get(&p).unwrap();
+                if remote_hashes.contains(h) {
+                    debug!("'{}' already exists in the remote cache. Skipping.", p);
+                    found.push(p);
+                } else {
+                    debug!("'{}' not found in remote cache. Will upload.", p);
+                    missing.push(p);
+                }
+            }
+            (missing, found)
+        } else if paths_to_check_remote.len() > 100 {
+            info!(
+                "Checking {} paths against remote using bulk list...",
+                paths_to_check_remote.len()
+            );
+            let remote_hashes: HashSet<String> =
+                self.uploader.list_all_hashes().await?.into_iter().collect();
+
+            let mut missing = Vec::new();
+            let mut found = Vec::new();
+            for p in paths_to_check_remote {
+                let h = hashes_map.get(&p).unwrap();
+                if remote_hashes.contains(h) {
+                    debug!("'{}' already exists in the remote cache. Skipping.", p);
+                    found.push(p);
+                } else {
+                    debug!("'{}' not found in remote cache. Will upload.", p);
+                    missing.push(p);
+                }
+            }
+            (missing, found)
+        } else {
+            // pass concurrency from config
+            self.uploader
+                .check_paths_exist(&paths_to_check_remote, self.config.loft.upload_threads)
+                .await?
+        };
+
         debug!("{} found on remote", found_remote.len());
 
-        // Add found-on-remote → local cache
+        // 3. Add newly discovered found-on-remote → local cache
         if !found_remote.is_empty() {
             let mut to_add = Vec::new();
             for p in &found_remote {
@@ -184,12 +229,14 @@ impl CacheChecker {
             self.local_cache.add_many_path_hashes(&to_add)?;
         }
 
-        // 3. Prepare upload list
-        // missing_remote contains paths that are not in remote cache.
-        // We just return them.
+        // 4. Return results
         Ok(CacheCheckResult {
-            to_upload: missing_remote,
-            already_cached: hashes,
+            already_cached: paths
+                .iter()
+                .filter(|p| !to_upload.contains(p))
+                .cloned()
+                .collect(),
+            to_upload,
         })
     }
 }

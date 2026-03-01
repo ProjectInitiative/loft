@@ -55,12 +55,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize the logging framework.
-    use tracing_subscriber::prelude::*;
-    let subscriber = tracing_subscriber::registry().with(console_subscriber::spawn());
-
     // Parse command-line arguments.
     let args = Args::parse();
+
+    // Initialize the logging framework.
+    use tracing_subscriber::prelude::*;
+    let registry = tracing_subscriber::registry();
 
     let fmt_layer = tracing_subscriber::fmt::layer();
 
@@ -70,9 +70,16 @@ async fn main() -> Result<()> {
         tracing_subscriber::EnvFilter::new("loft=info,tower=info")
     };
 
-    let subscriber = subscriber.with(fmt_layer.with_filter(filter));
+    let registry = registry.with(fmt_layer.with_filter(filter));
 
-    tracing::subscriber::set_global_default(subscriber)?;
+    // Try to spawn console subscriber, but don't panic if it fails (e.g. port already in use)
+    if std::env::var("TOKIO_CONSOLE_ADDR").is_ok() || args.debug {
+        let console_layer = console_subscriber::spawn();
+        let subscriber = registry.with(console_layer);
+        tracing::subscriber::set_global_default(subscriber)?;
+    } else {
+        tracing::subscriber::set_global_default(registry)?;
+    }
 
     // Load the application configuration.
     let config = Config::from_file(&args.config)?;
@@ -166,7 +173,7 @@ async fn main() -> Result<()> {
 
     info!("scan on startup: {}", config.loft.scan_on_startup);
     info!("scan already complete: {}", local_cache.is_scan_complete()?);
-    if config.loft.scan_on_startup && !local_cache.is_scan_complete()? {
+    if args.force_scan || config.loft.scan_on_startup && !(local_cache.is_scan_complete()?) {
         // Scan existing paths and upload them.
         info!("Scanning existing store paths...");
         nix_store_watcher::scan_and_process_existing_paths(
@@ -179,6 +186,11 @@ async fn main() -> Result<()> {
         info!("Finished scanning existing store paths.");
         // Mark the initial scan as complete.
         local_cache.set_scan_complete()?;
+    }
+
+    if args.force_scan {
+        info!("Force scan complete. Exiting.");
+        return Ok(());
     }
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
