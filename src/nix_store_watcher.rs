@@ -1,13 +1,16 @@
 //! Watches the Nix store for changes and triggers uploads.
 
 use anyhow::Result;
+use dashmap::DashMap;
 use futures::future::join_all;
 use notify::{Error as NotifyError, Event, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{error, info};
+use tracing::{debug, error, info};
+
+type InFlightRegistry = Arc<DashMap<String, ()>>;
 
 use crate::cache_checker::CacheChecker;
 use crate::config::Config;
@@ -180,6 +183,7 @@ pub async fn watch_store(
     let (tx, mut rx) = mpsc::channel(100);
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
     let mut join_set = tokio::task::JoinSet::new();
+    let in_flight: InFlightRegistry = Arc::new(DashMap::new());
 
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, NotifyError>| {
         if let Ok(event) = res {
@@ -211,23 +215,48 @@ pub async fn watch_store(
             }
             path_opt = rx.recv() => {
                 if let Some(path) = path_opt {
+                    let mut paths_batch = vec![path];
+                    
+                    // Debounce: Wait a bit to see if more paths arrive
+                    let debounce_duration = std::time::Duration::from_millis(500);
+                    let mut interval = tokio::time::interval(debounce_duration);
+                    interval.tick().await; // First tick is immediate
+
+                    loop {
+                        tokio::select! {
+                            more_path = rx.recv() => {
+                                if let Some(p) = more_path {
+                                    paths_batch.push(p);
+                                } else {
+                                    break;
+                                }
+                            }
+                            _ = interval.tick() => {
+                                break;
+                            }
+                        }
+                    }
+
                     let uploader_clone = uploader.clone();
                     let local_cache_clone = local_cache.clone();
                     let semaphore_clone = semaphore.clone();
-                    let config_for_task = config.clone(); // Clone config for the spawned task
+                    let config_for_task = config.clone();
+                    let in_flight_clone = in_flight.clone();
+
                     join_set.spawn(async move {
                         let permit = semaphore_clone.acquire_owned().await.unwrap();
-                        if let Err(e) = process_path(
+                        if let Err(e) = process_paths(
                             uploader_clone,
                             local_cache_clone,
-                            &path,
+                            paths_batch,
                             &config_for_task,
                             force_scan,
                             dry_run,
+                            in_flight_clone,
                         )
                         .await
                         {
-                            error!("Failed to process '{}': {:?}", path.display(), e);
+                            error!("Failed to process batch: {:?}", e);
                         }
                         drop(permit);
                     });
@@ -244,70 +273,131 @@ pub async fn watch_store(
     Ok(())
 }
 
-/// Processes a single store path for upload.
-pub async fn process_path(
+/// Processes a batch of store paths for upload.
+pub async fn process_paths(
     uploader: Arc<S3Uploader>,
     local_cache: Arc<LocalCache>,
-    path: &Path,
+    paths: Vec<PathBuf>,
     config: &Config,
     force_scan: bool,
     dry_run: bool,
+    in_flight: InFlightRegistry,
 ) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+
     // Add a small delay to allow for follow-up operations like signing
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-    let path_str = path.to_str().unwrap_or("").to_string();
+    let path_strs: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.to_str().map(|s| s.to_string()))
+        .collect();
 
-    // 1. Filter the path
-    let keys_to_skip = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
-    let sigs_map = nix::get_path_signatures_bulk(std::slice::from_ref(&path_str)).await?;
-    let filtered_paths = nix::filter_out_sig_keys(sigs_map, keys_to_skip.clone()).await?;
+    // 1. Initial filter against in-flight registry
+    let filtered_input: Vec<String> = path_strs
+        .into_iter()
+        .filter(|p| {
+            if in_flight.contains_key(p) {
+                debug!("Path {} is already in flight. Skipping.", p);
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
 
-    if filtered_paths.is_empty() {
-        info!("Skipping path: {}", path.display());
+    if filtered_input.is_empty() {
         return Ok(());
     }
 
-    // 2. Get closure
-    let closure = nix::get_store_path_closure(&path_str).await?;
+    info!("Processing batch of {} store paths", filtered_input.len());
 
-    // 3. Check caches BEFORE fetching signatures
+    // 2. Filter input paths by signatures
+    let keys_to_skip = config.loft.skip_signed_by_keys.clone().unwrap_or_default();
+    let sigs_map = nix::get_path_signatures_bulk(&filtered_input).await?;
+    let filtered_input_map = nix::filter_out_sig_keys(sigs_map, keys_to_skip.clone()).await?;
+    let filtered_input_vec: Vec<String> = filtered_input_map.keys().cloned().collect();
+
+    if filtered_input_vec.is_empty() {
+        info!("No paths in batch passed signature filtering.");
+        return Ok(());
+    }
+
+    // 3. Get closure for the entire batch
+    let closure_set: HashSet<String> = nix::get_store_paths_closure(&filtered_input_vec)
+        .await?
+        .into_iter()
+        .collect();
+
+    // 4. Filter closure against in-flight registry
+    let filtered_closure: Vec<String> = closure_set
+        .into_iter()
+        .filter(|p| {
+            if in_flight.contains_key(p) {
+                debug!("Closure path {} is already in flight. Skipping.", p);
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if filtered_closure.is_empty() {
+        debug!("Entire closure for batch is already in flight or empty.");
+        return Ok(());
+    }
+
+    // 5. Check caches BEFORE fetching signatures
     let nix_store = Arc::new(NixStore::connect()?);
     let checker = CacheChecker::new(uploader.clone(), local_cache.clone(), config.clone());
     let mut result = checker
-        .check_paths(nix_store.as_ref(), &closure, force_scan)
+        .check_paths(nix_store.as_ref(), &filtered_closure, force_scan)
         .await?;
 
     if result.to_upload.is_empty() {
-        info!("No missing paths to upload for {}.", path.display());
+        info!("No missing paths to upload for batch.");
         return Ok(());
     }
 
-    // 4. Get signatures for only the MISSING closure paths and filter again
+    // 6. Get signatures for only the MISSING closure paths and filter again
     let closure_signatures = nix::get_path_signatures_bulk(&result.to_upload).await?;
     let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
     let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
+    
     info!(
-        "Total paths after filtering missing closure for {}: {}",
-        path.display(),
+        "Total paths missing from cache after filtering: {}",
         filtered_closure_vec.len()
     );
 
     result.to_upload = filtered_closure_vec;
 
     if dry_run {
-        info!("DRY RUN: The following {} paths would be uploaded for {}:", result.to_upload.len(), path.display());
+        info!("DRY RUN: The following {} paths would be uploaded:", result.to_upload.len());
         for p in result.to_upload {
             info!("  DRY RUN: Would upload {}", p);
         }
         return Ok(());
     }
 
-    // 5. Upload missing
+    // 7. Register all paths about to be uploaded as in-flight
+    let mut actual_in_flight = Vec::new();
+    for p in &result.to_upload {
+        if in_flight.insert(p.clone(), ()).is_none() {
+            actual_in_flight.push(p.clone());
+        }
+    }
+
+    if actual_in_flight.is_empty() {
+        return Ok(());
+    }
+
+    // 8. Upload missing
     let semaphore = Arc::new(Semaphore::new(config.loft.upload_threads));
     let mut tasks = Vec::new();
 
-    for path_str in result.to_upload {
+    for path_str in &actual_in_flight {
         let uploader_clone = uploader.clone();
         let config_clone = config.clone();
         let semaphore_clone = semaphore.clone();
@@ -338,21 +428,26 @@ pub async fn process_path(
         .filter_map(|res| res.ok().flatten())
         .collect();
 
+    // 9. Unregister in-flight paths
+    for p in &actual_in_flight {
+        in_flight.remove(p);
+    }
+
     if !uploaded_hashes.is_empty() {
         if let Err(e) = local_cache.add_many_path_hashes(&uploaded_hashes) {
             error!(
-                "Failed to batch add paths to local cache for {}: {:?}",
-                path.display(),
+                "Failed to batch add paths to local cache: {:?}",
                 e
             );
         } else {
             info!(
-                "Successfully added {} paths to local cache for {}.",
+                "Successfully added {} paths to local cache.",
                 uploaded_hashes.len(),
-                path.display()
             );
         }
     }
 
     Ok(())
 }
+
+

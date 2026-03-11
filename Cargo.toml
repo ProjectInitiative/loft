@@ -1,6 +1,6 @@
 [package]
 name = "loft"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -21,6 +21,7 @@ tokio = { version = "1.38.0", features = ["full"] }
 toml = "0.8.14"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "registry", "env-filter"] }
+dashmap = "6.1.0"
 attic = { git = "https://github.com/zhaofengli/attic", branch = "main" }
 displaydoc = "0.2.5"
 itoa = "1.0.11"
