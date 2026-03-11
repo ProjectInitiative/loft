@@ -21,6 +21,7 @@ tokio = { version = "1.38.0", features = ["full"] }
 toml = "0.8.14"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "registry", "env-filter"] }
+dashmap = "6.1.0"
 attic = { git = "https://github.com/zhaofengli/attic", branch = "main" }
 displaydoc = "0.2.5"
 itoa = "1.0.11"

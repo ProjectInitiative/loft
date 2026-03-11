@@ -49,26 +49,15 @@
       jq
       garage
       loft
+      coreutils
     ];
 
     nix.settings = {
       experimental-features = [ "nix-command" "flakes" ];
       trusted-users = [ "root" ];
       substituters = [];
+      sandbox = false;
     };
-    
-    # Ensure we have a dummy nixpkgs available for nix-build
-    environment.variables.NIX_PATH = lib.mkForce "nixpkgs=/etc/nixpkgs";
-    environment.etc."nixpkgs/default.nix".text = ''
-      { ... }: {
-        runCommand = name: env: script: derivation {
-          inherit name script;
-          builder = "/bin/sh";
-          args = [ "-c" script ];
-          system = "${pkgs.system}";
-        };
-      }
-    '';
 
     networking.firewall.allowedTCPPorts = [ 3900 3901 ];
   };
@@ -140,17 +129,46 @@
         machine.wait_for_unit("loft.service", timeout=30)
         
         machine.log("Stress testing with 2 paths...")
-        p1 = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"p1\" {} \"echo 1 > $out\"' --impure").strip()
-        p2 = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"p2\" {} \"echo 2 > $out\"' --impure").strip()
+        p1 = machine.succeed("nix build --no-link --print-out-paths --expr 'derivation { name = \"p1\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo 1 > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure").strip()
+        p2 = machine.succeed("nix build --no-link --print-out-paths --expr 'derivation { name = \"p2\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo 2 > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure").strip()
         
         verify_cache(p1, s3_url, timeout=60)
         verify_cache(p2, s3_url, timeout=60)
+
+    with subtest("Concurrency: Deduplication of shared dependencies"):
+        reset_state()
+        machine.succeed("systemctl start loft.service")
+        machine.wait_for_unit("loft.service", timeout=30)
+        
+        # Create a shared dependency
+        dep = machine.succeed("nix build --no-link --print-out-paths --expr 'derivation { name = \"shared-dep\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo shared > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure").strip()
+        dep_hash = dep.split("/")[-1].split("-")[0]
+        
+        # Create two paths that depend on it
+        machine.log(f"Building p-alpha and p-beta sharing {dep_hash}")
+        nix_expr = "let dep = \"" + dep + "\"; in [ (derivation { name = \"p-alpha\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo a > $out; cat ''${dep} > /dev/null\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }) (derivation { name = \"p-beta\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo b > $out; cat ''${dep} > /dev/null\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }) ]"
+        machine.succeed(f"nix build --no-link --expr '{nix_expr}' --impure")
+        
+        # Wait for them to show up in S3
+        machine.wait_until_succeeds(with_s3(f"aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/{dep_hash}.narinfo"), timeout=60)
+        
+        # Check logs for duplicate uploads of the shared dependency
+        logs = machine.succeed("journalctl -u loft.service")
+        # We look for the "Initiating streaming multipart upload" message which happens once per upload attempt
+        upload_count = logs.count(f"Initiating streaming multipart upload for 'nar/{dep_hash}")
+        
+        if upload_count > 1:
+            # Note: It might be 0 if it was already in S3, but reset_state() clears S3.
+            # It should be exactly 1.
+            raise Exception(f"Shared dependency {dep_hash} was uploaded {upload_count} times! Expected 1.")
+        
+        machine.log(f"Verified: {dep_hash} was uploaded {upload_count} time(s).")
 
     with subtest("Config: skipSignedByKeys rejection"):
         reset_state()
         machine.succeed("systemctl start loft.service")
         machine.succeed("nix-store --generate-binary-cache-key test-exclude-key-1 /tmp/sk1 /tmp/pk1")
-        p_to_sign = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"signed-path\" {} \"echo signed > $out\"' --impure").strip()
+        p_to_sign = machine.succeed("nix build --no-link --print-out-paths --expr 'derivation { name = \"signed-path\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo signed > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure").strip()
         machine.succeed("nix store sign --key-file /tmp/sk1 " + p_to_sign)
         
         hash_part = p_to_sign.split("/")[-1].split("-")[0]
@@ -172,7 +190,7 @@
     with subtest("Service: Pruning verification"):
         reset_state()
         machine.succeed("systemctl start loft.service")
-        p = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"pp\" {} \"echo prune > $out\"' --impure").strip()
+        p = machine.succeed("nix build --no-link --print-out-paths --expr 'derivation { name = \"pp\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo prune > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure").strip()
         verify_cache(p, s3_url)
         
         machine.succeed("systemctl stop loft.service")
@@ -192,7 +210,7 @@
         machine.log("Creating pre-existing paths...")
         pre_paths = []
         for i in range(3):
-            p = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"pre-" + str(i) + "\" {} \"echo " + str(i) + " > $out\"' --impure").strip()
+            p = machine.succeed(f"nix build --no-link --print-out-paths --expr 'derivation {{ name = \"pre-{i}\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo {i} > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }}' --impure").strip()
             pre_paths.append(p)
             
         secure_copy(manual_config_content, manual_config)
@@ -209,7 +227,7 @@
         machine.succeed("systemctl stop loft.service")
         bulk_paths = []
         for i in range(5):
-            p = machine.succeed("nix build --no-link --print-out-paths --expr '(import <nixpkgs> {}).runCommand \"bulk-" + str(i) + "\" {} \"echo " + str(i) + " > $out\"' --impure").strip()
+            p = machine.succeed(f"nix build --no-link --print-out-paths --expr 'derivation {{ name = \"bulk-{i}\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo {i} > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }}' --impure").strip()
             bulk_paths.append(p)
         
         secure_copy(manual_config_content, manual_config)

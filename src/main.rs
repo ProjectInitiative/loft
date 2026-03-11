@@ -13,7 +13,7 @@ use loft::{config, local_cache, nix_store_watcher, pruner, s3_uploader};
 
 use config::Config;
 use local_cache::LocalCache;
-use nix_store_watcher::process_path; // Import process_path
+use nix_store_watcher::process_paths; // Import process_paths
 use pruner::Pruner;
 
 /// Command-line arguments for Loft.
@@ -128,25 +128,24 @@ async fn main() -> Result<()> {
 
     // Handle manual path uploads
     if let Some(paths_to_upload) = args.upload_path {
-        info!("Manually uploading specified paths...");
+        info!("Manually uploading {} specified paths...", paths_to_upload.len());
         let local_cache_clone = local_cache.clone();
         let uploader_clone = uploader.clone();
         let config_clone = config.clone();
+        let in_flight = Arc::new(dashmap::DashMap::new());
 
-        for path in paths_to_upload {
-            info!("Processing manual upload path: {}", path.display());
-            if let Err(e) = process_path(
-                uploader_clone.clone(),
-                local_cache_clone.clone(),
-                &path,
-                &config_clone,
-                true, // Force scan for manual uploads
-                args.dry_run,
-            )
-            .await
-            {
-                error!("Failed to manually upload '{}': {:?}", path.display(), e);
-            }
+        if let Err(e) = process_paths(
+            uploader_clone,
+            local_cache_clone,
+            paths_to_upload,
+            &config_clone,
+            true, // Force scan for manual uploads
+            args.dry_run,
+            in_flight,
+        )
+        .await
+        {
+            error!("Failed to manually upload paths: {:?}", e);
         }
         info!("Finished manual uploads.");
         return Ok(()); // Exit after manual uploads
