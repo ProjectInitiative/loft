@@ -174,6 +174,7 @@
         };
         checks = {
           integration = pkgsForTest.nixosTest (import ./nixos/tests/integration.nix);
+          extra-headers = pkgsForTest.nixosTest (import ./nixos/tests/extra-headers.nix);
           clippy = loftClippy;
           unit-tests = loftNextest;
         };
