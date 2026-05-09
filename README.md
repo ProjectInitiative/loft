@@ -75,7 +75,26 @@ In your `configuration.nix` (or a related file), you can now enable and configur
       # It's highly recommended to use sops-nix or agenix for secrets
       accessKeyFile = "/path/to/your/s3-access-key";
       secretKeyFile = "/path/to/your/s3-secret-key";
+
+      # Optional: Extra HTTP headers for every S3 request (e.g., Cloudflare Access).
+      # Three methods, all of which are combined (not overridden):
+      #
+      # 1. Inline headers (non-secret, baked into the world-readable Nix store):
+      extraHeaders = {
+        "CF-Access-Client-Id" = "xxx";
+        "CF-Access-Client-Secret" = "yyy";
+      };
+
+      # 2. File-based headers (secret, read at runtime — works with sops-nix/agenix):
+      extraHeadersFile = {
+        "CF-Access-Client-Id" = "/run/secrets/cf-access-id";
+        "CF-Access-Client-Secret" = "/run/secrets/cf-access-secret";
+      };
     };
+
+    # 3. Or set LOFT_EXTRA_HEADER_* env vars directly on the systemd service.
+    #    Underscores map to hyphens in header names.
+    #    Example: LOFT_EXTRA_HEADER_CF_ACCESS_CLIENT_ID → "CF-Access-Client-Id"
 
     # --- Loft Service Configuration ---
     debug = false; # Enable debug logging
@@ -120,6 +139,8 @@ When using the NixOS module, please be aware of the following:
 
 *   **`localCachePath` Location:** Due to the security sandboxing of the systemd service, the `localCachePath` must be located within the `/var/lib/loft` directory. The service does not have permission to write to other locations on the filesystem. The default path is `/var/lib/loft/cache.db`, which is the recommended setting.
 
+*   **Extra Headers:** The `extraHeaders` and `extraHeadersFile` options are combined. You can use both simultaneously — inline headers for non-secrets and file-based headers for secrets. All headers are merged into every S3 request.
+
 ## Configuration
 
 Loft is configured via a `loft.toml` file. The NixOS module generates this file for you. For other systems, you may need to create it manually.
@@ -131,6 +152,12 @@ Here's an example `loft.toml` that reflects the available options:
 bucket = "nix-cache"
 region = "us-east-1"
 endpoint = "http://172.16.1.50:31292"
+
+# Optional: Extra HTTP headers for every S3 request (e.g., Cloudflare Access)
+# Inline (non-secret):
+# [s3.extra_headers]
+# "CF-Access-Client-Id" = "xxx"
+# "CF-Access-Client-Secret" = "yyy"
 
 [loft]
 upload_threads = 12
@@ -148,6 +175,22 @@ prune_retention_days = 30
 # prune_target_percentage = 80
 # prune_schedule = "24h"
 ```
+
+## Extra HTTP Headers
+
+Loft supports adding custom HTTP headers to every S3 request, which is useful for authentication proxies like Cloudflare Access. There are three ways to provide them, all of which are **merged together** (not overridden):
+
+| Method | Scope | Use case |
+|--------|-------|----------|
+| `[s3.extra_headers]` in TOML | Config file | Non-secret headers baked into config |
+| `LOFT_EXTRA_HEADER_*` env vars | Process environment | Secrets (follows `AWS_ACCESS_KEY_ID` pattern) |
+| `extraHeadersFile` in NixOS | NixOS module | Secrets from sops-nix/agenix files |
+
+**Env var naming convention**: `LOFT_EXTRA_HEADER_` + header name with hyphens replaced by underscores. For example, `LOFT_EXTRA_HEADER_CF_ACCESS_CLIENT_ID` sets the `CF-Access-Client-Id` header.
+
+**NixOS wrapper**: When using `extraHeadersFile`, the module's systemd wrapper reads each file at runtime and exports the value as the corresponding `LOFT_EXTRA_HEADER_*` env var before launching loft.
+
+**Implementation detail**: Headers are injected via an SDK interceptor at the `modify_before_transmit` phase — after SigV4 signing. This is intentional: auth proxy headers like `CF-Access-*` are consumed and stripped by Cloudflare before the request reaches S3, so they must not be part of the AWS signature.
 
 ## Command-line arguments
 
