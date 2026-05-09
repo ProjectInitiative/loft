@@ -287,6 +287,12 @@ EOF
               echo ""
               echo "🧪 Cache testing script available! Run: cache-test"
               echo "   This will build loft with nom, then clean up all artifacts."
+              echo ""
+              echo "🧪 Integration tests:"
+              echo "   nix build .#checks.${system}.integration"
+              echo "   nix build .#checks.${system}.extra-headers"
+              echo "   nix build .#checks.${system}.clippy"
+              echo "   nix build .#checks.${system}.unit-tests"
             '';
           };
         };
