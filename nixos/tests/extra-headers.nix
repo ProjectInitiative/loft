@@ -17,6 +17,7 @@
         locations."/" = {
           proxyPass = "http://localhost:3900";
           extraConfig = ''
+            proxy_set_header Host $host:$server_port;
             if ($http_x_loft_auth != "test-token") {
                 return 403;
             }
@@ -184,7 +185,7 @@
         )
         p = build_path("hdr-noauth")
         secure_copy(cfg, "/tmp/loft-hdr-noauth.toml")
-        machine.succeed(with_s3("loft --config /tmp/loft-hdr-noauth.toml --force-scan 2>&1; true"))
+        _status, _output = machine.execute(with_s3("loft --config /tmp/loft-hdr-noauth.toml --force-scan 2>&1"))
         hash_part = p.split("/")[-1].split("-")[0]
         import time
         time.sleep(5)
