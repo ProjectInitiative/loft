@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -102,6 +103,10 @@ pub struct S3Config {
     pub endpoint: String,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
+    /// Optional extra HTTP headers to include on every S3 request.
+    /// Useful for authentication proxies (e.g., Cloudflare Access).
+    #[serde(default)]
+    pub extra_headers: HashMap<String, String>,
 }
 
 /// Sets the default number of upload threads if not specified.

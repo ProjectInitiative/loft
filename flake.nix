@@ -286,6 +286,16 @@ EOF
               echo ""
               echo "🧪 Cache testing script available! Run: cache-test"
               echo "   This will build loft with nom, then clean up all artifacts."
+              echo ""
+              echo "🧪 Run all checks (integration, clippy, unit-tests):"
+              echo "   nix flake check"
+              echo ""
+              echo "   Or individually:"
+              echo "   nix build .#checks.${system}.integration"
+              echo "   nix build .#checks.${system}.clippy"
+              echo "   nix build .#checks.${system}.unit-tests"
+              echo ""
+              echo "   Use --rebuild to re-run a cached result (e.g. nix build .#checks.${system}.integration --rebuild)"
             '';
           };
         };

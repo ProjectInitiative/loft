@@ -15,6 +15,7 @@ let
   baseConfig = {
     s3 = {
       inherit (cfg.s3) bucket region endpoint;
+      extra_headers = cfg.s3.extraHeaders;
     };
     loft = {
       upload_threads = cfg.uploadThreads;
@@ -46,6 +47,12 @@ let
   # Generate the final loft.toml content, stripping nulls
   loftToml = tomlFormat.generate "loft.toml" (removeNulls finalConfig);
 
+  # Build shell lines that export extra headers from files at runtime
+  # (built outside the script to avoid nested indented-string conflicts)
+  extraHeaderExports = lib.concatStringsSep "\n" (lib.mapAttrsToList (name: path:
+    "export LOFT_EXTRA_HEADER_${lib.toUpper (lib.replaceStrings ["-"] ["_"] name)}=$(cat ${path})"
+  ) cfg.s3.extraHeadersFile);
+
 in
 {
   ###### OPTIONS ######
@@ -71,6 +78,18 @@ in
       endpoint = mkOption { type = types.str; description = "S3 endpoint URL for the cache."; };
       accessKeyFile = mkOption { type = types.path; description = "Path to a file containing the S3 access key."; };
       secretKeyFile = mkOption { type = types.path; description = "Path to a file containing the S3 secret key."; };
+      extraHeaders = mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        description = "Extra HTTP headers to include on every S3 request. Useful for authentication proxies (e.g., Cloudflare Access).";
+        example = { "CF-Access-Client-Id" = "xxx"; "CF-Access-Client-Secret" = "yyy"; };
+      };
+      extraHeadersFile = mkOption {
+        type = types.attrsOf types.path;
+        default = { };
+        description = "Extra HTTP headers read from files at runtime. The attribute keys are header names, values are paths to files containing the header value. Useful with sops-nix or agenix for secrets.";
+        example = { "CF-Access-Client-Id" = "/run/secrets/cf-access-id"; };
+      };
     };
 
     localCachePath = mkOption {
@@ -171,6 +190,7 @@ in
               set -eu
               export AWS_ACCESS_KEY_ID=$(cat ${cfg.s3.accessKeyFile})
               export AWS_SECRET_ACCESS_KEY=$(cat ${cfg.s3.secretKeyFile})
+              ${extraHeaderExports}
               export PATH=${pkgs.nix}/bin:$PATH
               exec ${loft-pkg}/bin/loft --config ${loftToml} ${optionalString cfg.debug "--debug"}
             '';

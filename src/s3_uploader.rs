@@ -4,8 +4,14 @@ use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
+use aws_smithy_runtime_api::box_error::BoxError;
+use aws_smithy_runtime_api::client::interceptors::context::BeforeTransmitInterceptorContextMut;
+use aws_smithy_runtime_api::client::interceptors::Intercept;
+use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
+use aws_smithy_types::config_bag::ConfigBag;
 use futures::StreamExt;
 use http::StatusCode;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -60,10 +66,25 @@ impl S3Uploader {
 
         let sdk_config = config_loader.load().await;
 
-        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
-            .force_path_style(true)
-            .build();
+        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&sdk_config)
+            .force_path_style(true);
 
+        let mut extra_headers = config.extra_headers.clone();
+
+        for (env_name, env_value) in std::env::vars() {
+            if let Some(header_name) = env_name.strip_prefix("LOFT_EXTRA_HEADER_") {
+                let header_name = header_name.replace('_', "-");
+                extra_headers.insert(header_name, env_value);
+            }
+        }
+
+        if !extra_headers.is_empty() {
+            s3_config_builder = s3_config_builder.interceptor(CustomHeadersInterceptor {
+                headers: extra_headers,
+            });
+        }
+
+        let s3_config = s3_config_builder.build();
         let client = Client::from_conf(s3_config);
 
         Ok(S3Uploader {
@@ -626,6 +647,33 @@ impl RemoteCacheStorage for S3Uploader {
 
     fn list_all_hashes<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>>> {
         Box::pin(async move { self.list_all_narinfo_keys().await })
+    }
+}
+
+#[derive(Debug)]
+struct CustomHeadersInterceptor {
+    headers: HashMap<String, String>,
+}
+
+impl Intercept for CustomHeadersInterceptor {
+    fn name(&self) -> &'static str {
+        "custom_headers_interceptor"
+    }
+
+    fn modify_before_transmit(
+        &self,
+        context: &mut BeforeTransmitInterceptorContextMut<'_>,
+        _runtime_components: &RuntimeComponents,
+        _cfg: &mut ConfigBag,
+    ) -> Result<(), BoxError> {
+        let headers = context.request_mut().headers_mut();
+        for (name, value) in &self.headers {
+            headers.insert(
+                http::HeaderName::from_bytes(name.as_bytes())?,
+                http::HeaderValue::from_str(value)?,
+            );
+        }
+        Ok(())
     }
 }
 
