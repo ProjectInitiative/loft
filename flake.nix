@@ -295,7 +295,7 @@ EOF
               echo "   nix build .#checks.${system}.clippy"
               echo "   nix build .#checks.${system}.unit-tests"
               echo ""
-              echo "   Use --check to re-run a cached result (e.g. nix build .#checks.${system}.integration --check)"
+              echo "   Use --rebuild to re-run a cached result (e.g. nix build .#checks.${system}.integration --rebuild)"
             '';
           };
         };
