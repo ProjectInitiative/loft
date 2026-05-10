@@ -10,6 +10,22 @@
     virtualisation.memorySize = 2048;
     virtualisation.diskSize = 4096;
 
+    services.nginx = {
+      enable = true;
+      virtualHosts."auth-proxy" = {
+        listen = [ { port = 3902; addr = "0.0.0.0"; } ];
+        locations."/" = {
+          proxyPass = "http://localhost:3900";
+          extraConfig = ''
+            proxy_set_header Host $host:$server_port;
+            if ($http_x_loft_auth != "test-token") {
+                return 403;
+            }
+          '';
+        };
+      };
+    };
+
     services.garage = {
       enable = true;
       package = pkgs.garage;
@@ -59,7 +75,7 @@
       sandbox = false;
     };
 
-    networking.firewall.allowedTCPPorts = [ 3900 3901 ];
+    networking.firewall.allowedTCPPorts = [ 3900 3901 3902 ];
   };
 
   testScript = ''
@@ -98,7 +114,9 @@
         machine.log("Verified: " + path + " is fetchable from S3")
 
     machine.start()
+    machine.wait_for_unit("nginx.service", timeout=30)
     machine.wait_for_unit("garage.service", timeout=30)
+    machine.wait_for_open_port(3902, timeout=10)
     machine.wait_for_open_port(3900, timeout=10)
 
     with subtest("Initialize Garage"):
@@ -244,6 +262,75 @@
         for p in bulk_paths:
             verify_cache(p, s3_url)
 
-    machine.log("All advanced integration tests passed!")
+    with subtest("Extra Headers: inline config [s3.extra_headers]"):
+        reset_state()
+        cfg = (
+            "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3902\"\n"
+            "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n"
+            "[s3.extra_headers]\n\"X-Loft-Auth\" = \"test-token\"\n"
+            "[loft]\nupload_threads = 1\nscan_on_startup = true\n"
+            "local_cache_path = \"/var/lib/loft/cache-hdr-inline.db\"\n"
+        )
+        p = machine.succeed(
+            "nix build --no-link --print-out-paths --expr 'derivation { name = \"hdr-inline\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo hi > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure"
+        ).strip()
+        secure_copy(cfg, "/tmp/loft-hdr-inline.toml")
+        machine.succeed(with_s3("loft --config /tmp/loft-hdr-inline.toml --force-scan"))
+        verify_cache(p, s3_url)
+
+    with subtest("Extra Headers: LOFT_EXTRA_HEADER_* env var"):
+        reset_state()
+        cfg = (
+            "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3902\"\n"
+            "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n"
+            "[loft]\nupload_threads = 1\nscan_on_startup = true\n"
+            "local_cache_path = \"/var/lib/loft/cache-hdr-env.db\"\n"
+        )
+        p = machine.succeed(
+            "nix build --no-link --print-out-paths --expr 'derivation { name = \"hdr-env\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo he > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure"
+        ).strip()
+        secure_copy(cfg, "/tmp/loft-hdr-env.toml")
+        machine.succeed(
+            with_s3("LOFT_EXTRA_HEADER_X_LOFT_AUTH=test-token loft --config /tmp/loft-hdr-env.toml --force-scan")
+        )
+        verify_cache(p, s3_url)
+
+    with subtest("Extra Headers: file-based via LOFT_EXTRA_HEADER_*"):
+        reset_state()
+        secure_copy("test-token\n", "/run/secrets/loft-auth-token")
+        cfg = (
+            "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3902\"\n"
+            "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n"
+            "[loft]\nupload_threads = 1\nscan_on_startup = true\n"
+            "local_cache_path = \"/var/lib/loft/cache-hdr-file.db\"\n"
+        )
+        p = machine.succeed(
+            "nix build --no-link --print-out-paths --expr 'derivation { name = \"hdr-file\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo hf > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure"
+        ).strip()
+        secure_copy(cfg, "/tmp/loft-hdr-file.toml")
+        machine.succeed(
+            with_s3("LOFT_EXTRA_HEADER_X_LOFT_AUTH=$(cat /run/secrets/loft-auth-token) loft --config /tmp/loft-hdr-file.toml --force-scan")
+        )
+        verify_cache(p, s3_url)
+
+    with subtest("Extra Headers: missing header — paths not uploaded"):
+        reset_state()
+        cfg = (
+            "[s3]\nbucket = \"loft-test-bucket\"\nregion = \"us-east-1\"\nendpoint = \"http://localhost:3902\"\n"
+            "access_key = \"" + access_key + "\"\nsecret_key = \"" + secret_key + "\"\n"
+            "[loft]\nupload_threads = 1\nscan_on_startup = true\n"
+            "local_cache_path = \"/var/lib/loft/cache-hdr-noauth.db\"\n"
+        )
+        p = machine.succeed(
+            "nix build --no-link --print-out-paths --expr 'derivation { name = \"hdr-noauth\"; builder = \"/bin/sh\"; args = [ \"-c\" \"echo hn > $out\" ]; system = \"${pkgs.system}\"; PATH = \"/run/current-system/sw/bin\"; }' --impure"
+        ).strip()
+        secure_copy(cfg, "/tmp/loft-hdr-noauth.toml")
+        _status, _output = machine.execute(with_s3("loft --config /tmp/loft-hdr-noauth.toml --force-scan 2>&1"))
+        hash_part = p.split("/")[-1].split("-")[0]
+        import time
+        time.sleep(5)
+        machine.fail(with_s3("aws --endpoint-url http://localhost:3900 s3 ls s3://loft-test-bucket/" + hash_part + ".narinfo"))
+
+    machine.log("All integration tests passed!")
   '';
 }

@@ -174,7 +174,6 @@
         };
         checks = {
           integration = pkgsForTest.nixosTest (import ./nixos/tests/integration.nix);
-          extra-headers = pkgsForTest.nixosTest (import ./nixos/tests/extra-headers.nix);
           clippy = loftClippy;
           unit-tests = loftNextest;
         };
@@ -288,12 +287,11 @@ EOF
               echo "🧪 Cache testing script available! Run: cache-test"
               echo "   This will build loft with nom, then clean up all artifacts."
               echo ""
-              echo "🧪 Run all checks (integration, extra-headers, clippy, unit-tests):"
+              echo "🧪 Run all checks (integration, clippy, unit-tests):"
               echo "   nix flake check"
               echo ""
               echo "   Or individually:"
               echo "   nix build .#checks.${system}.integration"
-              echo "   nix build .#checks.${system}.extra-headers"
               echo "   nix build .#checks.${system}.clippy"
               echo "   nix build .#checks.${system}.unit-tests"
             '';
