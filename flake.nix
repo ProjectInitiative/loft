@@ -66,21 +66,16 @@
           };
 
           checks = {
-            clippy = loft.overrideAttrs (
+            check = loft.overrideAttrs (
               final: prev: {
-                pname = "${prev.pname}-clippy";
+                pname = "${prev.pname}-check";
                 nativeBuildInputs = prev.nativeBuildInputs or [ ] ++ [ pkgs.clippy ];
-                buildPhase = "cargo clippy --all-targets -- --deny warnings";
-                doInstall = false;
-                installPhase = "mkdir -p $out";
-              }
-            );
-            unit-tests = loft.overrideAttrs (
-              final: prev: {
-                pname = "${prev.pname}-test";
                 doCheck = true;
+                checkPhase = ''
+                  cargo clippy --all-targets -- --deny warnings
+                  cargo test
+                '';
                 installPhase = "mkdir -p $out";
-                checkPhase = "cargo test";
               }
             );
             integration = pkgsForTest.testers.nixosTest (import ./nixos/tests/integration.nix);
