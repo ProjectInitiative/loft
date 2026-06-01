@@ -117,7 +117,7 @@ fn decode_hash(s: &str, typ: &'static str, expected_bytes: usize) -> Result<Vec<
         let written =
             BASE64
                 .decode_slice(s, &mut buf)
-                .map_err(|e| Error::InvalidHashStringLength {
+                .map_err(|_e| Error::InvalidHashStringLength {
                     typ,
                     base16_len,
                     base32_len,
