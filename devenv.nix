@@ -25,7 +25,7 @@
 
   outputs.loft = pkgs.rustPlatform.buildRustPackage {
     pname = "loft";
-    version = "0.3.2";
+    version = "0.3.3";
     src = pkgs.lib.cleanSourceWith {
       src = ./.;
       filter =
