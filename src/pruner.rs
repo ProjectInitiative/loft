@@ -47,11 +47,7 @@ impl Pruner {
                     {
                         let size_u64 = size as u64;
                         current_bucket_size_bytes += size_u64;
-                        all_objects.push((
-                            key,
-                            last_modified.to_chrono_utc(),
-                            size_u64,
-                        ));
+                        all_objects.push((key, last_modified.to_chrono_utc(), size_u64));
                     }
                 }
             }
@@ -68,11 +64,17 @@ impl Pruner {
         let retention_days = config_ref.prune_retention_days;
         if retention_days > 0 {
             let cutoff_date = Utc::now() - Duration::days(retention_days as i64);
-            info!("Starting time-based pruning of objects older than {} days...", retention_days);
+            info!(
+                "Starting time-based pruning of objects older than {} days...",
+                retention_days
+            );
 
             for (key, last_modified, size) in &all_objects {
                 if *last_modified < cutoff_date {
-                    debug!("Pruning object by time: {} (LastModified: {})", key, last_modified);
+                    debug!(
+                        "Pruning object by time: {} (LastModified: {})",
+                        key, last_modified
+                    );
                     match self.uploader.delete_object(key).await {
                         Ok(_) => {
                             self.remove_from_local_cache(key);
@@ -99,14 +101,15 @@ impl Pruner {
                 );
 
                 let target_percentage = config_ref.prune_target_percentage.unwrap_or(80);
-                let target_size_bytes = (max_size_bytes as f64 * (target_percentage as f64 / 100.0)) as u64;
+                let target_size_bytes =
+                    (max_size_bytes as f64 * (target_percentage as f64 / 100.0)) as u64;
 
                 // Filter out already deleted and sort by date (oldest first)
                 let mut remaining_objects: Vec<_> = all_objects
                     .into_iter()
                     .filter(|(key, _, _)| !deleted_keys.contains(key))
                     .collect();
-                
+
                 remaining_objects.sort_by_key(|k| k.1);
 
                 for (key, _, size) in remaining_objects {

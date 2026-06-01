@@ -1,7 +1,7 @@
 //! Manages a local redb cache of uploaded paths with full thread safety.
 use crate::cache_checker::LocalCacheStorage;
+use crate::nix_store::NixStore;
 use anyhow::{anyhow, Result};
-use attic::nix_store::NixStore;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashSet;
 use std::path::Path;

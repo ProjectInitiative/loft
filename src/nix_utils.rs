@@ -8,15 +8,15 @@ use std::path::Path;
 use futures::stream::StreamExt;
 use serde_json::Value;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use attic::nix_store::NixStore; // Keep NixStore
-use attic::signing::NixKeypair; // Added this line
+use crate::nix_store::NixStore;
+use crate::signing::NixKeypair;
 
 use crate::config::{Compression, Config};
 use crate::nix_manifest::{self, NarInfo};
@@ -44,7 +44,10 @@ pub async fn filter_out_sig_keys(
             for sig in *sig_vec {
                 if let Signature::Crypto { key_name, .. } = sig {
                     if keys_to_skip_set.contains(key_name) {
-                        debug!("Skipping path {} because it is signed by {}", path, key_name);
+                        debug!(
+                            "Skipping path {} because it is signed by {}",
+                            path, key_name
+                        );
                         skip = true;
                         break;
                     }
@@ -54,7 +57,10 @@ pub async fn filter_out_sig_keys(
                 if sig_vec.is_empty() {
                     debug!("Keeping path {} because it has no signatures", path);
                 } else {
-                    debug!("Keeping path {} because no skip-keys matched its signatures", path);
+                    debug!(
+                        "Keeping path {} because no skip-keys matched its signatures",
+                        path
+                    );
                 }
             }
             !skip
@@ -98,7 +104,7 @@ fn parse_path_signatures_from_json(json_str: &str) -> Result<HashMap<String, Vec
 
 pub async fn get_all_path_signatures() -> Result<HashMap<String, Vec<Signature>>> {
     // Note: Since NixStore doesn't expose queryAllValidPaths directly in FFI yet,
-    // we might still need the CLI for this specific bulk operation, 
+    // we might still need the CLI for this specific bulk operation,
     // or we can iterate if we have a list of paths.
     // For now, let's keep the CLI for get_all_path_signatures but use NixStore for individual lookups.
     info!("Fetching and parsing all path signatures using nix CLI...");
@@ -126,7 +132,7 @@ pub async fn get_path_signatures_bulk(paths: &[String]) -> Result<HashMap<String
     if paths.is_empty() {
         return Ok(HashMap::new());
     }
-    
+
     info!(
         "Fetching and parsing signatures for {} paths using nix CLI...",
         paths.len()
@@ -137,7 +143,7 @@ pub async fn get_path_signatures_bulk(paths: &[String]) -> Result<HashMap<String
     for path in paths {
         cmd.arg(path);
     }
-    
+
     let output = cmd.output().await?;
 
     if !output.status.success() {
@@ -171,9 +177,7 @@ pub async fn get_path_signatures(paths: &[String]) -> Result<HashMap<String, Vec
                     let mut signatures = Vec::new();
                     for sig_str in path_info.sigs {
                         if sig_str.starts_with("ca:") {
-                            signatures.push(Signature::ContentAddressed {
-                                full_info: sig_str,
-                            });
+                            signatures.push(Signature::ContentAddressed { full_info: sig_str });
                         } else if let Some((key, signature)) = sig_str.split_once(':') {
                             signatures.push(Signature::Crypto {
                                 key_name: key.to_string(),
@@ -236,7 +240,7 @@ pub async fn get_store_paths_closure(store_paths: &[String]) -> Result<Vec<Strin
 }
 
 /// Gets the .narinfo key for a store path.
-pub fn get_narinfo_key(store_path: &attic::nix_store::StorePath) -> String {
+pub fn get_narinfo_key(store_path: &crate::nix_store::StorePath) -> String {
     format!("{}.narinfo", store_path.to_hash().as_str())
 }
 
@@ -273,7 +277,8 @@ pub async fn upload_nar_for_path(
     let nar_size = path_info.nar_size;
     let sigs = path_info.sigs;
 
-    let references: Vec<String> = path_info.references
+    let references: Vec<String> = path_info
+        .references
         .iter()
         .map(|r| {
             r.file_name()
@@ -305,7 +310,7 @@ pub async fn upload_nar_for_path(
     // We need to calculate FileHash (of compressed data) and FileSize.
     // For FileHash and FileSize, we unfortunately need to see the whole compressed stream.
     // However, we can still stream the upload. We'll capture the hash and size as we stream to S3.
-    
+
     let compression_task = tokio::spawn(async move {
         match compression_type {
             Compression::Xz => {
@@ -329,7 +334,7 @@ pub async fn upload_nar_for_path(
 
     let hasher_clone = hasher.clone();
     let file_size_clone = file_size_atomic.clone();
-    
+
     // We'll use a predictable NAR key (like store path hash + nar hash) and calculate FileHash during upload.
     let stream = async_stream::try_stream! {
         let mut buffer = vec![0u8; 64 * 1024];
@@ -337,18 +342,23 @@ pub async fn upload_nar_for_path(
             let n = compressed_rx.read(&mut buffer).await.map_err(|e| anyhow::anyhow!(e))?;
             if n == 0 { break; }
             let chunk = &buffer[..n];
-            
+
             {
                 let mut h = hasher_clone.lock().await;
                 h.update(chunk);
             }
             file_size_clone.fetch_add(n as u64, Ordering::SeqCst);
-            
+
             yield bytes::Bytes::copy_from_slice(chunk);
         }
     };
 
-    let nar_key = format!("nar/{}-{}.nar.{}", store_path_obj.to_hash().as_str(), nar_hash_typed.strip_prefix("sha256:").unwrap(), compression_ext);
+    let nar_key = format!(
+        "nar/{}-{}.nar.{}",
+        store_path_obj.to_hash().as_str(),
+        nar_hash_typed.strip_prefix("sha256:").unwrap(),
+        compression_ext
+    );
 
     uploader.upload_stream(stream, &nar_key).await?;
 
@@ -425,7 +435,7 @@ pub fn generate_nar_info(args: NarInfoArgs) -> Result<String> {
     ) {
         if key_path.exists() {
             let key_file_content = fs::read_to_string(key_path)?;
-            let nix_keypair = NixKeypair::from_str(&key_file_content)?;
+            let nix_keypair: NixKeypair = key_file_content.parse()?;
 
             let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&content)?;
             let fingerprint = nar_info_for_signing.fingerprint();
@@ -570,12 +580,19 @@ mod tests {
 
         let content = generate_nar_info(nar_info_args)?;
 
-        assert!(content.contains("StorePath: /nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0"));
-        assert!(content.contains("URL: nar/sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4.nar.xz"));
+        assert!(
+            content.contains("StorePath: /nix/store/hfx4mfjp89kv21whvwcmm2a0bjs0a428-loft-0.1.0")
+        );
+        assert!(content.contains(
+            "URL: nar/sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4.nar.xz"
+        ));
         assert!(content.contains("Compression: xz"));
-        assert!(content.contains("FileHash: sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4"));
+        assert!(content
+            .contains("FileHash: sha256:0h4ifpg71s11p3hbafhx3idf3zji7ny8wqnjgvrzmqw9d90d48w4"));
         assert!(content.contains("FileSize: 35634208"));
-        assert!(content.contains("NarHash: sha256:8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140"));
+        assert!(content.contains(
+            "NarHash: sha256:8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140"
+        ));
         assert!(content.contains("NarSize: 123456"));
         assert!(content.contains("References: 4azvwrcvsj6fy0x66shvl37pasw46k57-nix-2.28.4"));
         assert!(content.contains("CA: fixed:sha256:1234..."));
@@ -637,35 +654,35 @@ mod tests {
 
         // Verify XZ magic bytes (7zXZ)
         assert_eq!(&xz_compressed[0..6], &[0xFD, b'7', b'z', b'X', b'Z', 0x00]);
-        
+
         // Verify Zstd magic bytes (0x28B52FFD)
         assert_eq!(&zstd_compressed[0..4], &[0x28, 0xB5, 0x2F, 0xFD]);
 
         Ok(())
     }
 
-        #[test]
-        fn test_get_narinfo_key() -> Result<()> {
-            let hash = "hfx4mfjp89kv21whvwcmm2a0bjs0a428";
-    
-            let key = format!("{}.narinfo", hash);
-            assert_eq!(key, "hfx4mfjp89kv21whvwcmm2a0bjs0a428.narinfo");
-    
-            Ok(())
-        }
-        #[test]
+    #[test]
+    fn test_get_narinfo_key() -> Result<()> {
+        let hash = "hfx4mfjp89kv21whvwcmm2a0bjs0a428";
+
+        let key = format!("{}.narinfo", hash);
+        assert_eq!(key, "hfx4mfjp89kv21whvwcmm2a0bjs0a428.narinfo");
+
+        Ok(())
+    }
+    #[test]
     fn test_s3_key_hierarchy() -> Result<()> {
         let hash = "hfx4mfjp89kv21whvwcmm2a0bjs0a428";
         let nar_hash_base32 = "8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140";
         let compression_ext = "xz";
-        
+
         // This simulates the logic inside upload_nar_for_path
         let nar_key = format!("nar/{}-{}.nar.{}", hash, nar_hash_base32, compression_ext);
         assert_eq!(nar_key, "nar/hfx4mfjp89kv21whvwcmm2a0bjs0a428-8423d2406a89e3faf37ed2628ebc3d51fee15a1c1d3ab5e0b821e870de759140.nar.xz");
-        
+
         let narinfo_key = format!("{}.narinfo", hash);
         assert_eq!(narinfo_key, "hfx4mfjp89kv21whvwcmm2a0bjs0a428.narinfo");
-        
+
         Ok(())
     }
 }

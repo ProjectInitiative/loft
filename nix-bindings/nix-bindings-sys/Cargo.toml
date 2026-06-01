@@ -1,0 +1,34 @@
+[package]
+name                   = "nix-bindings-sys"
+description            = "Raw, unsafe FFI bindings to the Nix C API"
+edition.workspace      = true
+version.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+license.workspace      = true
+publish                = true
+readme                 = "./README.md"
+
+[package.metadata.docs.rs]
+targets = [ "x86_64-unknown-linux-gnu" ]
+
+[features]
+default = [ "full" ]
+expr    = [  ]
+flake   = [  ]
+full    = [ "store", "expr", "util", "flake", "main" ]
+main    = [  ]
+store   = [  ]
+util    = [  ]
+
+[lib]
+path = "lib.rs"
+
+[build-dependencies]
+bindgen.workspace         = true
+cc.workspace              = true
+doxygen-bindgen.workspace = true
+pkg-config.workspace      = true
+
+[dev-dependencies]
+serial_test.workspace = true

@@ -8,16 +8,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 type InFlightRegistry = Arc<DashMap<String, ()>>;
 
 use crate::cache_checker::CacheChecker;
 use crate::config::Config;
 use crate::local_cache::LocalCache;
+use crate::nix_store::NixStore;
 use crate::nix_utils as nix;
 use crate::s3_uploader::S3Uploader;
-use attic::nix_store::NixStore;
 
 // fn strip_lock_file(p: &Path) -> Option<PathBuf> {
 //     p.to_str()
@@ -43,7 +43,8 @@ pub async fn scan_and_process_existing_paths(
     let initial_scanned_count = all_sigs_map.len();
 
     // 2. Identify "root" paths (paths we built or aren't signed by skip-keys)
-    let root_paths_map = nix::filter_out_sig_keys(all_sigs_map.clone(), keys_to_skip.clone()).await?;
+    let root_paths_map =
+        nix::filter_out_sig_keys(all_sigs_map.clone(), keys_to_skip.clone()).await?;
     let root_paths_vec: Vec<String> = root_paths_map.keys().cloned().collect();
 
     // 3. Expand closures of those root paths to ensure coverage
@@ -68,7 +69,10 @@ pub async fn scan_and_process_existing_paths(
     }
 
     if !missing_sigs_paths.is_empty() {
-        info!("Fetching signatures for {} newly discovered closure paths...", missing_sigs_paths.len());
+        info!(
+            "Fetching signatures for {} newly discovered closure paths...",
+            missing_sigs_paths.len()
+        );
         let extra_sigs = nix::get_path_signatures_bulk(&missing_sigs_paths).await?;
         all_sigs_map.extend(extra_sigs);
     }
@@ -112,7 +116,10 @@ pub async fn scan_and_process_existing_paths(
     }
 
     if dry_run {
-        info!("DRY RUN: The following {} paths would be uploaded:", result.to_upload.len());
+        info!(
+            "DRY RUN: The following {} paths would be uploaded:",
+            result.to_upload.len()
+        );
         for path in &result.to_upload {
             info!("  DRY RUN: Would upload {}", path);
         }
@@ -216,7 +223,7 @@ pub async fn watch_store(
             path_opt = rx.recv() => {
                 if let Some(path) = path_opt {
                     let mut paths_batch = vec![path];
-                    
+
                     // Debounce: Wait a bit to see if more paths arrive
                     let debounce_duration = std::time::Duration::from_millis(500);
                     let mut interval = tokio::time::interval(debounce_duration);
@@ -245,17 +252,47 @@ pub async fn watch_store(
 
                     join_set.spawn(async move {
                         let permit = semaphore_clone.acquire_owned().await.unwrap();
-                        if let Err(e) = process_paths(
-                            uploader_clone,
-                            local_cache_clone,
-                            paths_batch,
-                            &config_for_task,
-                            force_scan,
-                            dry_run,
-                            in_flight_clone,
-                        )
-                        .await
-                        {
+                        let max_retries = 3u32;
+                        let mut delay = std::time::Duration::from_secs(1);
+                        let mut last_error = None;
+
+                        for attempt in 0..=max_retries {
+                            let result = process_paths(
+                                uploader_clone.clone(),
+                                local_cache_clone.clone(),
+                                paths_batch.clone(),
+                                &config_for_task,
+                                force_scan,
+                                dry_run,
+                                in_flight_clone.clone(),
+                            )
+                            .await;
+
+                            match result {
+                                Ok(()) => {
+                                    last_error = None;
+                                    break;
+                                }
+                                Err(e) => {
+                                    let err_str = format!("{:#}", e);
+                                    if attempt < max_retries && err_str.contains("not valid")
+                                    {
+                                        warn!(
+                                            "Batch processing failed (attempt {}): paths may not be valid yet. Retrying in {:?}...",
+                                            attempt + 1, delay,
+                                        );
+                                        tokio::time::sleep(delay).await;
+                                        delay *= 2;
+                                        last_error = Some(e);
+                                    } else {
+                                        last_error = Some(e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(e) = last_error {
                             error!("Failed to process batch: {:?}", e);
                         }
                         drop(permit);
@@ -365,7 +402,7 @@ pub async fn process_paths(
     let closure_signatures = nix::get_path_signatures_bulk(&result.to_upload).await?;
     let filtered_closure_paths = nix::filter_out_sig_keys(closure_signatures, keys_to_skip).await?;
     let filtered_closure_vec: Vec<String> = filtered_closure_paths.keys().cloned().collect();
-    
+
     info!(
         "Total paths missing from cache after filtering: {}",
         filtered_closure_vec.len()
@@ -374,7 +411,10 @@ pub async fn process_paths(
     result.to_upload = filtered_closure_vec;
 
     if dry_run {
-        info!("DRY RUN: The following {} paths would be uploaded:", result.to_upload.len());
+        info!(
+            "DRY RUN: The following {} paths would be uploaded:",
+            result.to_upload.len()
+        );
         for p in result.to_upload {
             info!("  DRY RUN: Would upload {}", p);
         }
@@ -435,10 +475,7 @@ pub async fn process_paths(
 
     if !uploaded_hashes.is_empty() {
         if let Err(e) = local_cache.add_many_path_hashes(&uploaded_hashes) {
-            error!(
-                "Failed to batch add paths to local cache: {:?}",
-                e
-            );
+            error!("Failed to batch add paths to local cache: {:?}", e);
         } else {
             info!(
                 "Successfully added {} paths to local cache.",
@@ -449,5 +486,3 @@ pub async fn process_paths(
 
     Ok(())
 }
-
-
