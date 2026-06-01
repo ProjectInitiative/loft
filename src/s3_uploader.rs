@@ -22,9 +22,9 @@ use chrono::{DateTime, Utc};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
-use bytes::Bytes;
 use crate::cache_checker::RemoteCacheStorage;
 use crate::config::S3Config;
+use bytes::Bytes;
 use futures::future::BoxFuture;
 
 const MIN_MULTIPART_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
@@ -66,8 +66,8 @@ impl S3Uploader {
 
         let sdk_config = config_loader.load().await;
 
-        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&sdk_config)
-            .force_path_style(true);
+        let mut s3_config_builder =
+            aws_sdk_s3::config::Builder::from(&sdk_config).force_path_style(true);
 
         let mut extra_headers = config.extra_headers.clone();
 
@@ -202,7 +202,11 @@ impl S3Uploader {
             }
         }
 
-        debug!("Found {} .narinfo hashes in S3 bucket '{}'.", all_hashes.len(), self.bucket);
+        debug!(
+            "Found {} .narinfo hashes in S3 bucket '{}'.",
+            all_hashes.len(),
+            self.bucket
+        );
         Ok(all_hashes)
     }
 

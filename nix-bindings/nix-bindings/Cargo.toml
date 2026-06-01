@@ -1,0 +1,32 @@
+[package]
+name                   = "nix-bindings"
+description            = "Rust binding for Nix, the build tool"
+edition.workspace      = true
+version.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+license.workspace      = true
+publish                = true
+readme                 = "./README.md"
+
+[package.metadata.docs.rs]
+targets = [ "x86_64-unknown-linux-gnu" ]
+
+[features]
+default = [ "full" ]
+full    = [ "nix-bindings-sys/full", "store", "expr", "util", "flake", "main", "external", "primop" ]
+
+expr     = [ "store", "nix-bindings-sys/expr" ]
+external = [ "store", "nix-bindings-sys/util" ]
+flake    = [ "expr", "nix-bindings-sys/flake" ]
+main     = [ "nix-bindings-sys/main" ]
+primop   = [ "expr", "nix-bindings-sys/expr" ]
+store    = [ "nix-bindings-sys/store", "nix-bindings-sys/expr", "nix-bindings-sys/util" ]
+util     = [ "nix-bindings-sys/util" ]
+
+[dependencies]
+nix-bindings-sys.workspace = true
+
+[dev-dependencies]
+serial_test.workspace = true
+tempfile.workspace    = true

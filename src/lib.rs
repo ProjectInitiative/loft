@@ -1,10 +1,11 @@
-// In your new src/lib.rs file
-
 pub mod cache_checker;
 pub mod config;
+pub mod hash;
 pub mod local_cache;
 pub mod nix_manifest;
+pub mod nix_store;
 pub mod nix_store_watcher;
 pub mod nix_utils;
 pub mod pruner;
 pub mod s3_uploader;
+pub mod signing;

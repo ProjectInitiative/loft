@@ -36,8 +36,8 @@ use self::deserializer::Deserializer;
 use self::serializer::Serializer;
 use anyhow::Result;
 
-use attic::hash::Hash;
-use attic::signing::NixKeypair;
+use crate::hash::Hash;
+use crate::signing::NixKeypair;
 use itoa;
 
 pub fn from_str<T>(s: &str) -> Result<T>

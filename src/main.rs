@@ -128,7 +128,10 @@ async fn main() -> Result<()> {
 
     // Handle manual path uploads
     if let Some(paths_to_upload) = args.upload_path {
-        info!("Manually uploading {} specified paths...", paths_to_upload.len());
+        info!(
+            "Manually uploading {} specified paths...",
+            paths_to_upload.len()
+        );
         let local_cache_clone = local_cache.clone();
         let uploader_clone = uploader.clone();
         let config_clone = config.clone();
@@ -313,10 +316,7 @@ async fn populate_local_cache_from_s3(
     let all_hashes = uploader.list_all_narinfo_keys().await?;
     info!("Found {} hashes in S3.", all_hashes.len());
 
-    debug!(
-        "Adding {} hashes to local cache.",
-        all_hashes.len()
-    );
+    debug!("Adding {} hashes to local cache.", all_hashes.len());
 
     local_cache.add_many_path_hashes(&all_hashes)?;
     local_cache.set_scan_complete()?;

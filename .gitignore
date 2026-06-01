@@ -7,13 +7,16 @@ Cargo.lock
 .idea/
 .vscode/
 
-#Config
+# Config
 loft.toml
 attic/
 
-#env
+# Env / Direnv / Nix
 .direnv
+.devenv/
+.devenv.flake.nix
 .env
 result
 .loft_scan_complete
 .loft_cache.db
+.pre-commit-config.yaml

@@ -6,7 +6,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-use attic::nix_store::NixStore;
+use crate::nix_store::NixStore;
 
 /// Trait for local cache storage operations.
 pub trait LocalCacheStorage: Send + Sync {
