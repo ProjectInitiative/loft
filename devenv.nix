@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, config, ... }:
 {
   cachix.enable = false;
 
@@ -22,6 +22,38 @@
 
   env.PKG_CONFIG_PATH = "${pkgs.nix.dev}/lib/pkgconfig";
   env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+  outputs.loft = pkgs.rustPlatform.buildRustPackage {
+    pname = "loft";
+    version = "0.3.2";
+    src = pkgs.lib.cleanSourceWith {
+      src = ./.;
+      filter =
+        path: type:
+        let
+          relPath = pkgs.lib.removePrefix (toString ./.) (toString path);
+        in
+        !(pkgs.lib.hasPrefix "/target" relPath)
+        && !(pkgs.lib.hasPrefix "/.direnv" relPath)
+        && !(pkgs.lib.hasPrefix "/.devenv" relPath)
+        && !(pkgs.lib.hasPrefix "/vendor" relPath);
+    };
+    nativeBuildInputs = with pkgs; [
+      pkg-config
+      clang
+      llvmPackages.libclang.lib
+    ];
+    buildInputs = with pkgs; [
+      nix
+      nix.dev
+      openssl
+    ];
+    PKG_CONFIG_PATH = "${pkgs.nix.dev}/lib/pkgconfig";
+    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+    cargoHash = "sha256-TG3RHFyyGpRa8/9J5KOzI/hd2GyiKb01p/NOpIv3VxI=";
+  };
+
+  outputs.cache-test = import ./nix/cache-test.nix { inherit pkgs; };
 
   enterShell = ''
     if [ -f ./.env ]; then

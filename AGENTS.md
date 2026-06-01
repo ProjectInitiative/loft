@@ -2,7 +2,7 @@
 
 ## Environment
 
-This project uses **devenv** for both builds and the development environment. The toolchain is pinned via `rust-overlay`. The dev shell is loaded automatically via `direnv`.
+This project uses **devenv** for both builds and the development environment. Everything is defined in `devenv.nix` — `flake.nix` just wires outputs.
 
 ## Available Commands
 

@@ -1,4 +1,5 @@
 use std::convert::TryInto;
+use std::str::FromStr;
 
 use serde::{de, ser, Deserialize, Serialize};
 
@@ -59,15 +60,6 @@ impl NixKeypair {
         })
     }
 
-    pub fn from_str(keypair: &str) -> Result<Self> {
-        let (name, bytes) = decode_string(keypair, "keypair", KeyPair::BYTES, None)?;
-        let keypair = KeyPair::from_slice(&bytes).map_err(Error::SignatureError)?;
-        Ok(Self {
-            name: name.to_string(),
-            keypair,
-        })
-    }
-
     pub fn export_keypair(&self) -> String {
         format!("{}:{}", self.name, BASE64_STANDARD.encode(*self.keypair))
     }
@@ -99,14 +91,29 @@ impl NixKeypair {
     }
 }
 
+impl FromStr for NixKeypair {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let (name, bytes) = decode_string(s, "keypair", KeyPair::BYTES, None)?;
+        let keypair = KeyPair::from_slice(&bytes).map_err(Error::SignatureError)?;
+        Ok(Self {
+            name: name.to_string(),
+            keypair,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for NixKeypair {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: de::Deserializer<'de>,
     {
         use de::Error;
-        String::deserialize(deserializer)
-            .and_then(|s| Self::from_str(&s).map_err(|e| Error::custom(e.to_string())))
+        String::deserialize(deserializer).and_then(|s| {
+            s.parse()
+                .map_err(|e: anyhow::Error| Error::custom(e.to_string()))
+        })
     }
 }
 
@@ -120,15 +127,6 @@ impl Serialize for NixKeypair {
 }
 
 impl NixPublicKey {
-    pub fn from_str(public_key: &str) -> Result<Self> {
-        let (name, bytes) = decode_string(public_key, "public key", PublicKey::BYTES, None)?;
-        let public = PublicKey::from_slice(&bytes).map_err(Error::SignatureError)?;
-        Ok(Self {
-            name: name.to_string(),
-            public,
-        })
-    }
-
     pub fn export(&self) -> String {
         format!("{}:{}", self.name, BASE64_STANDARD.encode(*self.public))
     }
@@ -140,6 +138,19 @@ impl NixPublicKey {
         self.public
             .verify(message, &signature)
             .map_err(|e| Error::SignatureError(e).into())
+    }
+}
+
+impl FromStr for NixPublicKey {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let (name, bytes) = decode_string(s, "public key", PublicKey::BYTES, None)?;
+        let public = PublicKey::from_slice(&bytes).map_err(Error::SignatureError)?;
+        Ok(Self {
+            name: name.to_string(),
+            public,
+        })
     }
 }
 

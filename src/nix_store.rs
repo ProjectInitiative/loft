@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -128,7 +129,7 @@ impl NixStore {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str())
-                    .map(|s| PathBuf::from(s))
+                    .map(PathBuf::from)
                     .collect()
             })
             .unwrap_or_default();
@@ -329,9 +330,11 @@ impl StorePathHash {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
 
-    pub fn to_string(&self) -> String {
-        self.0.clone()
+impl fmt::Display for StorePathHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

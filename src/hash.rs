@@ -106,12 +106,13 @@ impl Serialize for Hash {
 fn decode_hash(s: &str, typ: &'static str, expected_bytes: usize) -> Result<Vec<u8>> {
     let base16_len = expected_bytes * 2;
     let base32_len = (expected_bytes * 8 - 1) / 5 + 1;
-    let base64_len = (expected_bytes + 2) / 3 * 4;
+    let base64_len = expected_bytes.div_ceil(3) * 4;
     let v = if s.len() == base16_len {
         hex::decode(s).map_err(Error::InvalidBase16Hash)?
     } else if s.len() == base32_len {
         nix_base32::from_nix_base32(s).ok_or(Error::InvalidBase32Hash)?
-    } else if s.len() == base64_len || (s.len() > 0 && s.len() <= base64_len && s.ends_with('=')) {
+    } else if s.len() == base64_len || (!s.is_empty() && s.len() <= base64_len && s.ends_with('='))
+    {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         let mut buf = vec![0u8; expected_bytes];
         let written =

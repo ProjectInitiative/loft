@@ -435,7 +435,7 @@ pub fn generate_nar_info(args: NarInfoArgs) -> Result<String> {
     ) {
         if key_path.exists() {
             let key_file_content = fs::read_to_string(key_path)?;
-            let nix_keypair = NixKeypair::from_str(&key_file_content)?;
+            let nix_keypair: NixKeypair = key_file_content.parse()?;
 
             let nar_info_for_signing = nix_manifest::from_str::<NarInfo>(&content)?;
             let fingerprint = nar_info_for_signing.fingerprint();

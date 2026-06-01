@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 type InFlightRegistry = Arc<DashMap<String, ()>>;
 
@@ -252,17 +252,47 @@ pub async fn watch_store(
 
                     join_set.spawn(async move {
                         let permit = semaphore_clone.acquire_owned().await.unwrap();
-                        if let Err(e) = process_paths(
-                            uploader_clone,
-                            local_cache_clone,
-                            paths_batch,
-                            &config_for_task,
-                            force_scan,
-                            dry_run,
-                            in_flight_clone,
-                        )
-                        .await
-                        {
+                        let max_retries = 3u32;
+                        let mut delay = std::time::Duration::from_secs(1);
+                        let mut last_error = None;
+
+                        for attempt in 0..=max_retries {
+                            let result = process_paths(
+                                uploader_clone.clone(),
+                                local_cache_clone.clone(),
+                                paths_batch.clone(),
+                                &config_for_task,
+                                force_scan,
+                                dry_run,
+                                in_flight_clone.clone(),
+                            )
+                            .await;
+
+                            match result {
+                                Ok(()) => {
+                                    last_error = None;
+                                    break;
+                                }
+                                Err(e) => {
+                                    let err_str = format!("{:#}", e);
+                                    if attempt < max_retries && err_str.contains("not valid")
+                                    {
+                                        warn!(
+                                            "Batch processing failed (attempt {}): paths may not be valid yet. Retrying in {:?}...",
+                                            attempt + 1, delay,
+                                        );
+                                        tokio::time::sleep(delay).await;
+                                        delay *= 2;
+                                        last_error = Some(e);
+                                    } else {
+                                        last_error = Some(e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(e) = last_error {
                             error!("Failed to process batch: {:?}", e);
                         }
                         drop(permit);
