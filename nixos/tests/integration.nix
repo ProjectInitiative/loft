@@ -3,80 +3,101 @@
 {
   name = "loft-integration-test";
 
-  nodes.machine = { config, pkgs, lib, ... }: {
-    imports = [ ../module.nix ];
+  nodes.machine =
+    {
+      config,
+      pkgs,
+      lib,
+      ...
+    }:
+    {
+      imports = [ ../module.nix ];
 
-    virtualisation.writableStore = true;
-    virtualisation.memorySize = 2048;
-    virtualisation.diskSize = 4096;
+      virtualisation.writableStore = true;
+      virtualisation.memorySize = 2048;
+      virtualisation.diskSize = 4096;
 
-    services.nginx = {
-      enable = true;
-      virtualHosts."auth-proxy" = {
-        listen = [ { port = 3902; addr = "0.0.0.0"; } ];
-        locations."/" = {
-          proxyPass = "http://localhost:3900";
-          extraConfig = ''
-            proxy_set_header Host $host:$server_port;
-            if ($http_x_loft_auth != "test-token") {
-                return 403;
+      services.nginx = {
+        enable = true;
+        virtualHosts."auth-proxy" = {
+          listen = [
+            {
+              port = 3902;
+              addr = "0.0.0.0";
             }
-          '';
+          ];
+          locations."/" = {
+            proxyPass = "http://localhost:3900";
+            extraConfig = ''
+              proxy_set_header Host $host:$server_port;
+              if ($http_x_loft_auth != "test-token") {
+                  return 403;
+              }
+            '';
+          };
         };
       };
-    };
 
-    services.garage = {
-      enable = true;
-      package = pkgs.garage;
-      settings = {
-        metadata_dir = "/var/lib/garage/meta";
-        data_dir = "/var/lib/garage/data";
-        replication_factor = 1;
-        rpc_bind_addr = "[::]:3901";
-        rpc_secret = "0000000000000000000000000000000000000000000000000000000000000000";
-        s3_api = {
-          s3_region = "us-east-1";
-          api_bind_addr = "[::]:3900";
-          root_domain = ".s3.garage.localhost";
+      services.garage = {
+        enable = true;
+        package = pkgs.garage;
+        settings = {
+          metadata_dir = "/var/lib/garage/meta";
+          data_dir = "/var/lib/garage/data";
+          replication_factor = 1;
+          rpc_bind_addr = "[::]:3901";
+          rpc_secret = "0000000000000000000000000000000000000000000000000000000000000000";
+          s3_api = {
+            s3_region = "us-east-1";
+            api_bind_addr = "[::]:3900";
+            root_domain = ".s3.garage.localhost";
+          };
         };
       };
-    };
 
-    services.loft = {
-      enable = true;
-      s3 = {
-        bucket = "loft-test-bucket";
-        endpoint = "http://localhost:3900";
-        region = "us-east-1";
-        accessKeyFile = "/etc/loft-s3-access-key";
-        secretKeyFile = "/etc/loft-s3-secret-key";
+      services.loft = {
+        enable = true;
+        s3 = {
+          bucket = "loft-test-bucket";
+          endpoint = "http://localhost:3900";
+          region = "us-east-1";
+          accessKeyFile = "/etc/loft-s3-access-key";
+          secretKeyFile = "/etc/loft-s3-secret-key";
+        };
+        uploadThreads = 4;
+        scanOnStartup = false;
+        populateCacheOnStartup = false;
+        skipSignedByKeys = [
+          "test-exclude-key-1"
+          "cache.nixos.org-1"
+        ];
       };
-      uploadThreads = 4;
-      scanOnStartup = false;
-      populateCacheOnStartup = false;
-      skipSignedByKeys = [ "test-exclude-key-1" "cache.nixos.org-1" ];
+
+      systemd.services.loft.wantedBy = lib.mkForce [ ];
+
+      environment.systemPackages = with pkgs; [
+        awscli2
+        jq
+        garage
+        loft
+        coreutils
+      ];
+
+      nix.settings = {
+        experimental-features = [
+          "nix-command"
+          "flakes"
+        ];
+        trusted-users = [ "root" ];
+        sandbox = false;
+      };
+
+      networking.firewall.allowedTCPPorts = [
+        3900
+        3901
+        3902
+      ];
     };
-
-    systemd.services.loft.wantedBy = lib.mkForce [];
-
-    environment.systemPackages = with pkgs; [
-      awscli2
-      jq
-      garage
-      loft
-      coreutils
-    ];
-
-    nix.settings = {
-      experimental-features = [ "nix-command" "flakes" ];
-      trusted-users = [ "root" ];
-      substituters = [];
-      sandbox = false;
-    };
-
-    networking.firewall.allowedTCPPorts = [ 3900 3901 3902 ];
-  };
 
   testScript = ''
     import re
